@@ -53,8 +53,9 @@ redirects are refused.
 
 | File | Content | Permissions |
 | --- | --- | --- |
-| `<state-dir>/baseline.json` | device metadata accepted as known-good | 0600, written atomically |
+| `<state-dir>/baseline.json` | device metadata accepted as known-good | 0600, written atomically, at most 64 MiB on load |
 | `<state-dir>/audit.jsonl` | every isolate and release, dry runs included | 0600, opened O_APPEND, hash-chained |
+| `<state-dir>/audit.jsonl.lock` | empty; an OS lock on it serialises appends | 0600 |
 
 The audit chain is tamper-evident, not tamper-proof: a changed, removed or
 inserted line is detected, except at the very end of the file, and someone
