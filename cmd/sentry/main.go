@@ -84,7 +84,8 @@ commands:
 
 Credentials come only from the environment: TS_API_KEY, or
 TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET. Without them, scan and
-baseline fall back to the local tailscaled (read-only, partial view).
+baseline fall back to the local tailscaled (read-only, partial view;
+baseline then needs --allow-partial).
 
 exit codes: 0 clean, 1 anomalies found (see scan --fail-on), 2 error.
 Run "sentry <command> -h" for a command's flags.
@@ -344,6 +345,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	c.register(fs, d)
 	force := fs.Bool("force", false, "replace an existing baseline")
 	accept := fs.String("accept", "", "accept one device's current state into the existing baseline, leaving the rest unchanged")
+	allowPartial := fs.Bool("allow-partial", false, "allow recording a baseline from the local source, which can miss devices")
 	if pos, err := parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -359,6 +361,15 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if *accept != "" {
 		return acceptDevice(&c, inv, *accept, d)
 	}
+	// A baseline is what later scans call healthy. One recorded from the
+	// local source silently leaves out devices this machine cannot see, so
+	// it takes an explicit opt-in (with --source auto it is otherwise what
+	// a missing credential would produce).
+	if inv.Source == inventory.SourceLocal && !*allowPartial {
+		return errors.New("the local source sees only the devices this machine's policy shows it, so a baseline " +
+			"from it can miss devices and later scans would not report them. Set API credentials for a full " +
+			"inventory, or pass --allow-partial to record a partial baseline anyway")
+	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
 		return err
@@ -367,6 +378,9 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 		return report.Build(inv, &b, nil, version, d.now()).WriteJSON(d.stdout)
 	}
 	fmt.Fprintf(d.stdout, "Recorded %d devices from the %s source to %s\n", len(inv.Devices), inv.Source, c.baselinePath())
+	if inv.Source == inventory.SourceLocal {
+		fmt.Fprintln(d.stdout, report.DegradedNote)
+	}
 	fmt.Fprintln(d.stdout, "Every device, owner, tag and route below is now accepted. Check that you recognise each one:")
 	fmt.Fprintln(d.stdout)
 	for _, dev := range inv.Devices {
@@ -600,19 +614,28 @@ func execute(ctx context.Context, client *tsapi.Client, log *audit.Log, plan qua
 	if err := log.Append(e); err != nil {
 		return fmt.Errorf("not applied, the audit log could not be written: %w", err)
 	}
+	// Each step's outcome goes into the outcome line, so a run that failed
+	// part-way records exactly which changes were made and which were not.
 	var stepErr error
 	for i, s := range plan.Steps {
-		switch s.Kind {
-		case quarantine.SetTags:
-			stepErr = client.SetTags(ctx, plan.Device.ID, s.Tags)
-		case quarantine.SetAuthorized:
-			stepErr = client.SetAuthorized(ctx, plan.Device.ID, s.Authorized)
+		res := audit.StepResult{Step: stepLabel(s), Result: audit.StepSkipped}
+		if stepErr == nil {
+			var err error
+			switch s.Kind {
+			case quarantine.SetTags:
+				err = client.SetTags(ctx, plan.Device.ID, s.Tags)
+			case quarantine.SetAuthorized:
+				err = client.SetAuthorized(ctx, plan.Device.ID, s.Authorized)
+			}
+			if err != nil {
+				stepErr = fmt.Errorf("step %d (%s) failed: %w", i+1, s.Kind, err)
+				res.Result = "error: " + tsapi.Redact(err.Error())
+			} else {
+				res.Result = audit.ResultOK
+				fmt.Fprintf(d.stdout, "done: %s\n", s)
+			}
 		}
-		if stepErr != nil {
-			stepErr = fmt.Errorf("step %d (%s) failed: %w", i+1, s.Kind, stepErr)
-			break
-		}
-		fmt.Fprintf(d.stdout, "done: %s\n", s)
+		e.Steps = append(e.Steps, res)
 	}
 	e.Time = d.now().UTC()
 	e.Result = audit.ResultOK
@@ -631,6 +654,17 @@ func execute(ctx context.Context, client *tsapi.Client, log *audit.Log, plan qua
 	}
 	fmt.Fprintf(d.stdout, "\n%s applied to %s; recorded in %s\n", plan.Action, report.Clean(plan.Device.ShortName()), log.Path())
 	return nil
+}
+
+// stepLabel names a step for the audit log, with the value it sets.
+func stepLabel(s quarantine.Step) string {
+	switch s.Kind {
+	case quarantine.SetTags:
+		return s.Kind + "=" + strings.Join(s.Tags, ",")
+	case quarantine.SetAuthorized:
+		return fmt.Sprintf("%s=%t", s.Kind, s.Authorized)
+	}
+	return s.Kind
 }
 
 func printPlan(w io.Writer, p quarantine.Plan) {

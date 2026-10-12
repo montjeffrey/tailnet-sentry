@@ -55,7 +55,9 @@ they are configured.
    - **`api`**: `GET /api/v2/tailnet/{tailnet}/devices?fields=all`. The whole tailnet, every field.
      It needs a credential (see [Token scopes](#token-scopes)).
    - **`local`**: `tailscale status --json`. It needs no credential and is read-only, but it only
-     sees the peers this device's policy lets it see, and fewer fields per peer.
+     sees the peers this device's policy lets it see, and fewer fields per peer. Its reports are
+     labelled `DEGRADED` (`"degraded": true` in JSON), and recording a baseline from it needs
+     `--allow-partial`. Use the API for production monitoring.
    - `--source auto` (the default) uses the API when credentials are set, else the local daemon.
 2. **Baseline.** `sentry baseline` records the known-good state of each device to a local JSON
    file: id, name, owner, OS, tags, addresses, client version, key expiry, authorization,
@@ -94,15 +96,17 @@ line in `SHA256SUMS` instead of running `sha256sum`. Then rename the binary to `
 `sentry.exe`) and put it on your `PATH`.
 
 The binary has no dependencies beyond the Go standard library. The `local` source and the
-isolate self-check need the `tailscale` CLI on `PATH` (or in its default install location).
+isolate self-check need the `tailscale` CLI. Sentry looks in Tailscale's default install locations
+first and only then on `PATH`, so a writable directory early in a scheduler's `PATH` cannot stand
+in for it.
 
 ## Quick start: dry run against your tailnet
 
 No credentials, nothing changed:
 
 ```bash
-sentry baseline --source local      # review the list it prints: it is now "known good"
-sentry scan --source local          # exit 0 = all healthy
+sentry baseline --source local --allow-partial   # review the list it prints: it is now "known good"
+sentry scan --source local                       # exit 0 = all healthy (of the devices it can see)
 ```
 
 With the API, which sees every device:
@@ -187,14 +191,18 @@ Limits:
   get them back.
 - **Deauthorize.** `--deauthorize` revokes the device's authorization. It is the stronger cut where
   [device approval](https://tailscale.com/docs/features/access-control/device-management/device-approval)
-  is enabled.
+  is enabled. It runs before the tags change, so if a later step fails the device is left
+  disconnected rather than relabelled but still connected. The audit log's outcome line records
+  each step as `ok`, `error: ...` or `skipped`.
 - **Subnet routers and exit nodes.** Tags do not revoke a device's approved routes. Routed
   traffic is allowed by grants to the routed CIDR (or `autogroup:internet`), not by the router's
   own tags, so a quarantined router can keep forwarding. The plan warns you; use `--deauthorize`,
   or revoke its routes in the admin console.
 - **Shared-in devices** (from another tailnet) cannot be tagged. Remove the share instead.
 - **Release only re-authorizes what sentry deauthorized.** A device that was awaiting approval
-  before isolation stays unapproved unless you pass `--reauthorize`.
+  before isolation stays unapproved unless you pass `--reauthorize`. "Deauthorized" means the audit
+  log records the deauthorize step as `ok`: after a failed attempt, or a run interrupted before its
+  outcome line, release leaves the device as it finds it and asks for `--reauthorize`.
 
 ## Rules
 
@@ -344,8 +352,9 @@ run. The script's header has the full registration, including a logon trigger an
 
 | Path (under `--state-dir`) | What |
 | --- | --- |
-| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically |
+| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically; refused if over 64 MiB |
 | `audit.jsonl` | one JSON line per isolate or release (dry runs too), opened append-only and hash-chained (tamper-evident except at the tail); check it with `sentry audit verify` |
+| `audit.jsonl.lock` | empty; held while an entry is appended, so sentry runs at the same moment take turns instead of forking the chain |
 
 The default state directory is your user config directory: `%APPDATA%\tailnet-sentry`,
 `~/.config/tailnet-sentry` or `~/Library/Application Support/tailnet-sentry`. Both files describe

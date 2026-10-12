@@ -96,3 +96,21 @@ func TestLoadErrors(t *testing.T) {
 		}
 	}
 }
+
+// An oversized baseline is refused before it is parsed, so a huge or
+// tampered file cannot exhaust memory.
+func TestLoadRefusesOversizedFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "huge.json")
+	f, err := os.Create(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sparse where the filesystem allows: the size is what matters.
+	if err := f.Truncate(MaxSize + 1); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "larger than 64 MiB") {
+		t.Errorf("Load error = %v", err)
+	}
+}

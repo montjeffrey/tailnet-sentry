@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -128,15 +129,28 @@ func (b *Baseline) Owners() []string {
 	return out
 }
 
+// MaxSize bounds a baseline file. A device record is well under 1 KiB, so
+// this is far beyond any real tailnet; a larger file is refused rather than
+// read into memory.
+const MaxSize = 64 << 20
+
 // Load reads a baseline. A missing file is reported with fs.ErrNotExist in
 // its chain, so callers can tell "never baselined" from "corrupt".
 func Load(path string) (Baseline, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return Baseline{}, fmt.Errorf("no baseline at %s (run `sentry baseline` first): %w", path, err)
 		}
 		return Baseline{}, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, MaxSize+1))
+	if err != nil {
+		return Baseline{}, err
+	}
+	if len(data) > MaxSize {
+		return Baseline{}, fmt.Errorf("baseline %s is larger than %d MiB; refusing to load it", path, MaxSize>>20)
 	}
 	var b Baseline
 	if err := json.Unmarshal(data, &b); err != nil {

@@ -58,11 +58,19 @@ type Report struct {
 	Version     string           `json:"version"`
 	GeneratedAt time.Time        `json:"generatedAt"`
 	Source      inventory.Source `json:"source"`
-	Baseline    *BaselineInfo    `json:"baseline,omitempty"`
-	Summary     Summary          `json:"summary"`
-	Devices     []DeviceStatus   `json:"devices"`
-	Findings    []rules.Finding  `json:"findings"`
+	// Degraded is set for the local source, which sees only the peers this
+	// device's policy shows it: a clean report is not proof of a clean tailnet.
+	Degraded bool            `json:"degraded,omitempty"`
+	Baseline *BaselineInfo   `json:"baseline,omitempty"`
+	Summary  Summary         `json:"summary"`
+	Devices  []DeviceStatus  `json:"devices"`
+	Findings []rules.Finding `json:"findings"`
 }
+
+// DegradedNote is printed with every report and baseline from the local
+// source.
+const DegradedNote = "DEGRADED: local source, partial view. Devices this machine's policy hides, " +
+	"and devices awaiting approval, are not listed. Use the API source for full coverage."
 
 // Build assembles a report. findings must come from rules.Evaluate on inv.
 func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Finding, version string, now time.Time) Report {
@@ -71,7 +79,8 @@ func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Fi
 	for _, f := range findings {
 		byDevice[f.DeviceID] = append(byDevice[f.DeviceID], f)
 	}
-	r := Report{Tool: "tailnet-sentry", Version: version, GeneratedAt: now.UTC(), Source: inv.Source, Findings: findings}
+	r := Report{Tool: "tailnet-sentry", Version: version, GeneratedAt: now.UTC(), Source: inv.Source,
+		Degraded: inv.Source == inventory.SourceLocal, Findings: findings}
 	if r.Findings == nil {
 		r.Findings = []rules.Finding{}
 	}
@@ -116,6 +125,9 @@ func (r Report) WriteTable(w io.Writer) error {
 		head += fmt.Sprintf("  baseline: %s (%d devices)", r.Baseline.CreatedAt.Format(time.DateOnly), r.Baseline.Devices)
 	}
 	fmt.Fprintln(w, head)
+	if r.Degraded {
+		fmt.Fprintln(w, DegradedNote)
+	}
 	fmt.Fprintln(w)
 
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
