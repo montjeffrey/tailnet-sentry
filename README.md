@@ -94,7 +94,9 @@ line in `SHA256SUMS` instead of running `sha256sum`. Then rename the binary to `
 `sentry.exe`) and put it on your `PATH`.
 
 The binary has no dependencies beyond the Go standard library. The `local` source and the
-isolate self-check need the `tailscale` CLI on `PATH` (or in its default install location).
+isolate self-check need the `tailscale` CLI. Sentry looks in Tailscale's default install locations
+first and only then on `PATH`, so a writable directory early in a scheduler's `PATH` cannot stand
+in for it.
 
 ## Quick start: dry run against your tailnet
 

@@ -96,12 +96,19 @@ func TestScrubbedVarsMatchCredentialEnv(t *testing.T) {
 func TestChildEnvDropsCredentials(t *testing.T) {
 	t.Setenv("TS_API_KEY", "tskey-api-should-not-pass")
 	t.Setenv("TS_OAUTH_CLIENT_SECRET", "tskey-client-should-not-pass")
-	t.Setenv("SENTRY_TEST_KEEP", "yes")
+	t.Setenv("SENTRY_WEBHOOK", "https://hooks.example.invalid/should-not-pass")
+	t.Setenv("SENTRY_TEST_OTHER", "should-not-pass")
+	t.Setenv("PATH", "/kept")
 	env := strings.Join(childEnv(ScrubbedVars), "\n")
 	if strings.Contains(env, "should-not-pass") {
-		t.Error("credential passed to the tailscale subprocess")
+		t.Errorf("a credential or unlisted variable reached the tailscale subprocess:\n%s", env)
 	}
-	if !strings.Contains(env, "SENTRY_TEST_KEEP=yes") {
-		t.Error("ordinary variables must be kept")
+	if !strings.Contains(strings.ToUpper(env), "PATH=/KEPT") {
+		t.Error("PATH must be kept")
+	}
+	for _, c := range ScrubbedVars {
+		if containsFold(KeptVars, c) {
+			t.Errorf("%s is a credential and must not be in KeptVars", c)
+		}
 	}
 }
