@@ -1,9 +1,12 @@
 package audit
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -202,5 +205,90 @@ func TestVerifySkipsBlankLines(t *testing.T) {
 	_ = os.WriteFile(empty, []byte("\n\n"), 0o600)
 	if n, err := Verify(empty); err != nil || n != 0 {
 		t.Errorf("empty: %d, %v", n, err)
+	}
+}
+
+// Two Log values on one file stand in for two sentry processes: each append
+// opens its own lock handle, so they contend exactly as processes would.
+// Without the lock this forks the chain within a few lines.
+func TestConcurrentAppendersKeepTheChain(t *testing.T) {
+	a := newLog(t)
+	b, err := Open(a.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const per = 200
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i, l := range []*Log{a, b} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for j := 0; j < per; j++ {
+				e := entry(ActionIsolate, ModeDryRun, ResultPlanned)
+				e.Reason = fmt.Sprintf("writer %d entry %d", i, j)
+				if err := l.Append(e); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if n, err := Verify(a.Path()); err != nil || n != 2*per {
+		t.Fatalf("Verify = %d, %v; want %d entries and an intact chain", n, err, 2*per)
+	}
+}
+
+// readLastLine must agree with splitting the whole file, including when the
+// last line straddles the 64 KiB read chunks.
+func TestReadLastLine(t *testing.T) {
+	long := strings.Repeat("x", 70<<10)
+	tests := []struct{ name, data, want string }{
+		{"empty", "", ""},
+		{"only newlines", "\n\n\n", ""},
+		{"one line", `{"a":1}`, `{"a":1}`},
+		{"one line newline", "{\"a\":1}\n", `{"a":1}`},
+		{"two lines", "first\nsecond\n", "second"},
+		{"trailing blank lines", "first\nsecond\n\n\n", "second"},
+		{"long last line", "first\n" + long + "\n", long},
+		{"long last line alone", long, long},
+		{"newline on a chunk edge", strings.Repeat("y", 64<<10-1) + "\nlast\n", "last"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "log.jsonl")
+			if err := os.WriteFile(p, []byte(tt.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readLastLine(p)
+			if err != nil || string(got) != tt.want {
+				t.Errorf("readLastLine = %d bytes %.20q, %v; want %d bytes %.20q", len(got), got, err, len(tt.want), tt.want)
+			}
+		})
+	}
+	if got, err := readLastLine(filepath.Join(t.TempDir(), "missing.jsonl")); got != nil || err != nil {
+		t.Errorf("missing: %q, %v", got, err)
+	}
+}
+
+// A line longer than any entry can be is refused, not buffered: by Verify,
+// and by Append, which would otherwise read it to hash it.
+func TestOverlongLineIsRefused(t *testing.T) {
+	l := newLog(t)
+	appendAll(t, l, entry(ActionIsolate, ModeApply, ResultOK))
+	f, err := os.OpenFile(l.Path(), os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.Write(bytes.Repeat([]byte("z"), maxLine+2))
+	f.Close()
+	if _, err := Verify(l.Path()); err == nil || !strings.Contains(err.Error(), "line 2: longer than") {
+		t.Errorf("Verify error = %v", err)
+	}
+	if err := l.Append(entry(ActionIsolate, ModeApply, ResultOK)); err == nil || !strings.Contains(err.Error(), "longer than") {
+		t.Errorf("Append error = %v", err)
 	}
 }

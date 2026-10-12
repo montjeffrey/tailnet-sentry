@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -99,17 +100,28 @@ func Open(path string) (*Log, error) {
 // Path returns the file the log writes to.
 func (l *Log) Path() string { return l.path }
 
+// maxLine bounds one entry. Read, Verify and Append all refuse a longer
+// line rather than buffer it.
+const maxLine = 1 << 20
+
 // Append chains e to the last line and writes it with O_APPEND, so an
-// existing line is never rewritten. One sentry process at a time is
-// assumed; two appending at once could fork the chain, which verify would
-// then report.
+// existing line is never rewritten. From reading the last line to writing
+// the new one it holds an exclusive lock on "<log>.lock", so sentry
+// processes running at once take turns instead of forking the chain. Only
+// the end of the log is read, so an append costs the same however long the
+// log has grown.
 func (l *Log) Append(e Entry) error {
-	data, err := os.ReadFile(l.path)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+	unlock, err := l.lock()
+	if err != nil {
+		return fmt.Errorf("audit log: %w", err)
+	}
+	defer unlock()
+	last, err := readLastLine(l.path)
+	if err != nil {
 		return fmt.Errorf("audit log: %w", err)
 	}
 	e.Prev = ""
-	if last := lastLine(data); last != nil {
+	if last != nil {
 		e.Prev = hashLine(last)
 	}
 	if e.Time.IsZero() {
@@ -134,6 +146,24 @@ func (l *Log) Append(e Entry) error {
 	return f.Close()
 }
 
+// lock takes the append lock and returns the function that releases it. The
+// lock lives on a separate file because Windows locks are mandatory: locking
+// the log itself would block anyone reading it.
+func (l *Log) lock() (func(), error) {
+	f, err := os.OpenFile(l.path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lockFile(f); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("lock %s: %w", f.Name(), err)
+	}
+	return func() {
+		_ = unlockFile(f)
+		f.Close()
+	}, nil
+}
+
 // Read returns every entry in order.
 func Read(path string) ([]Entry, error) {
 	f, err := os.Open(path)
@@ -143,7 +173,7 @@ func Read(path string) ([]Entry, error) {
 	defer f.Close()
 	var out []Entry
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
+	sc.Buffer(make([]byte, 64<<10), maxLine)
 	for n := 1; sc.Scan(); n++ {
 		if len(bytes.TrimSpace(sc.Bytes())) == 0 {
 			continue
@@ -160,29 +190,63 @@ func Read(path string) ([]Entry, error) {
 // Verify checks the hash chain and returns the number of entries. The error
 // names the first line whose "prev" does not match the line before it.
 // Removing or editing lines at the end of the file cannot be detected from
-// the file alone: nothing after them carries their hash.
+// the file alone: nothing after them carries their hash. The log is read a
+// line at a time, so memory does not grow with it.
 func Verify(path string) (int, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return 0, err
 	}
+	defer f.Close()
+	r := bufio.NewReaderSize(f, 64<<10)
 	prev := ""
 	n := 0
-	for i, line := range bytes.Split(data, []byte("\n")) {
+	for i := 1; ; i++ {
+		line, err := readLine(r)
+		if errors.Is(err, io.EOF) {
+			return n, nil
+		}
+		if err != nil {
+			return n, fmt.Errorf("line %d: %w", i, err)
+		}
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue // as Read does; the hash covers only entry lines
 		}
 		var e Entry
 		if err := json.Unmarshal(line, &e); err != nil {
-			return n, fmt.Errorf("line %d is not a valid entry: %w", i+1, err)
+			return n, fmt.Errorf("line %d is not a valid entry: %w", i, err)
 		}
 		if e.Prev != prev {
-			return n, fmt.Errorf("chain broken at line %d: an earlier line was changed, removed or inserted", i+1)
+			return n, fmt.Errorf("chain broken at line %d: an earlier line was changed, removed or inserted", i)
 		}
 		prev = hashLine(line)
 		n++
 	}
-	return n, nil
+}
+
+var errLongLine = fmt.Errorf("longer than %d bytes", maxLine)
+
+// readLine returns the next line without its "\n", or io.EOF after the
+// last. A final line without "\n" is still returned.
+func readLine(r *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := r.ReadSlice('\n')
+		line = append(line, chunk...)
+		if len(line) > maxLine+1 {
+			return nil, errLongLine
+		}
+		switch {
+		case err == nil:
+			return line[:len(line)-1], nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF) && len(line) > 0:
+			return line, nil
+		default:
+			return nil, err
+		}
+	}
 }
 
 // Isolation is what release needs to know about a device's current
@@ -251,15 +315,53 @@ func deauthorized(e Entry) bool {
 	return false
 }
 
-func lastLine(data []byte) []byte {
-	data = bytes.TrimRight(data, "\n")
-	if len(data) == 0 {
-		return nil
+// readLastLine returns the log's last line, ignoring trailing newlines, or
+// nil if the log is missing or empty. It reads backwards from the end, so
+// its cost does not depend on the log's size.
+func readLastLine(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
 	}
-	if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
-		return data[i+1:]
+	if err != nil {
+		return nil, err
 	}
-	return data
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	const chunk = 64 << 10
+	var tail []byte
+	for end := st.Size(); end > 0; {
+		n := min(int64(chunk), end)
+		end -= n
+		buf := make([]byte, n, int(n)+len(tail))
+		if _, err := f.ReadAt(buf, end); err != nil {
+			return nil, err
+		}
+		tail = append(buf, tail...)
+		data := bytes.TrimRight(tail, "\n")
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			return checkLast(data[i+1:])
+		}
+		if len(tail) > maxLine+chunk {
+			return nil, fmt.Errorf("last line is %w", errLongLine)
+		}
+	}
+	if data := bytes.TrimRight(tail, "\n"); len(data) > 0 {
+		return checkLast(data)
+	}
+	return nil, nil
+}
+
+// checkLast refuses a last line Read and Verify would refuse, so the chain
+// is never extended from one.
+func checkLast(line []byte) ([]byte, error) {
+	if len(line) > maxLine {
+		return nil, fmt.Errorf("last line is %w", errLongLine)
+	}
+	return line, nil
 }
 
 func hashLine(line []byte) string {
