@@ -200,7 +200,9 @@ Limits:
   or revoke its routes in the admin console.
 - **Shared-in devices** (from another tailnet) cannot be tagged. Remove the share instead.
 - **Release only re-authorizes what sentry deauthorized.** A device that was awaiting approval
-  before isolation stays unapproved unless you pass `--reauthorize`.
+  before isolation stays unapproved unless you pass `--reauthorize`. "Deauthorized" means the audit
+  log records the deauthorize step as `ok`: after a failed attempt, or a run interrupted before its
+  outcome line, release leaves the device as it finds it and asks for `--reauthorize`.
 
 ## Rules
 

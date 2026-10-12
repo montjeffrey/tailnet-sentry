@@ -52,6 +52,10 @@ func TestIsolateDeauthorizesFirst(t *testing.T) {
 	if s := stepResults(entries[1]); s != "set-authorized=false:ok set-tags=tag:quarantine:ok" {
 		t.Errorf("audit steps = %q", s)
 	}
+	// release finds a successful deauthorize by this label.
+	if entries[1].Steps[0].Step != audit.StepDeauthorize {
+		t.Errorf("deauthorize step labelled %q, release looks for %q", entries[1].Steps[0].Step, audit.StepDeauthorize)
+	}
 }
 
 // A tagging failure after deauthorization leaves the device disconnected,
@@ -93,5 +97,39 @@ func TestIsolateDeauthorizeFailureRecordsSkippedSteps(t *testing.T) {
 	}
 	if strings.Contains(outcome.Steps[0].Result, "ThisIsNotARealKey") {
 		t.Error("step result not redacted")
+	}
+}
+
+// An isolate whose deauthorize failed never disconnected the device, so a
+// later release must not approve it: if the device has since become
+// unauthorized, that was not sentry's doing.
+func TestReleaseDoesNotReauthorizeAfterFailedDeauthorize(t *testing.T) {
+	h := newHarness(t)
+	if code, errOut, _ := isolateWithFailure(t, h, "/authorized"); code != exitError {
+		t.Fatalf("isolate exit %d %s", code, errOut)
+	}
+	h.api.mu.Lock()
+	h.api.fail = 0
+	for _, d := range h.api.devices {
+		if d["nodeId"] == "nKALICNTRL" {
+			d["authorized"] = false // deauthorized by someone else since
+		}
+	}
+	h.api.mu.Unlock()
+
+	code, out, errOut := h.run("release", "kali", "--apply")
+	if code != exitClean {
+		t.Fatalf("release exit %d\n%s%s", code, out, errOut)
+	}
+	for _, w := range h.api.getWrites() {
+		if strings.HasSuffix(strings.Fields(w)[0], "/authorized") {
+			t.Errorf("release re-authorized a device sentry never deauthorized: %s", w)
+		}
+	}
+	if dev := h.api.device("nKALICNTRL"); dev["authorized"] != false {
+		t.Errorf("device = %v, want it left unauthorized", dev)
+	}
+	if !strings.Contains(out, "no record of deauthorizing it") {
+		t.Errorf("release output does not explain why it stays unauthorized:\n%s", out)
 	}
 }
