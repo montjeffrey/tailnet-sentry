@@ -84,7 +84,8 @@ commands:
 
 Credentials come only from the environment: TS_API_KEY, or
 TS_OAUTH_CLIENT_ID and TS_OAUTH_CLIENT_SECRET. Without them, scan and
-baseline fall back to the local tailscaled (read-only, partial view).
+baseline fall back to the local tailscaled (read-only, partial view;
+baseline then needs --allow-partial).
 
 exit codes: 0 clean, 1 anomalies found (see scan --fail-on), 2 error.
 Run "sentry <command> -h" for a command's flags.
@@ -357,6 +358,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	accept := fs.String("accept", "", "accept one device's current state into the existing baseline, leaving the rest unchanged")
 	digest := fs.Bool("digest", false, "print the sha256 of the existing baseline, for --baseline-sha256, and exit")
 	reseal := fs.Bool("reseal", false, "bless the existing baseline file as it is now, after a deliberate hand edit")
+	allowPartial := fs.Bool("allow-partial", false, "allow recording a baseline from the local source, which can miss devices")
 	if pos, err := parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -378,6 +380,15 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if *accept != "" {
 		return acceptDevice(&c, inv, *accept, d)
 	}
+	// A baseline is what later scans call healthy. One recorded from the
+	// local source silently leaves out devices this machine cannot see, so
+	// it takes an explicit opt-in (with --source auto it is otherwise what
+	// a missing credential would produce).
+	if inv.Source == inventory.SourceLocal && !*allowPartial {
+		return errors.New("the local source sees only the devices this machine's policy shows it, so a baseline " +
+			"from it can miss devices and later scans would not report them. Set API credentials for a full " +
+			"inventory, or pass --allow-partial to record a partial baseline anyway")
+	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
 		return err
@@ -387,6 +398,9 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	fmt.Fprintf(d.stdout, "Recorded %d devices from the %s source to %s\n", len(inv.Devices), inv.Source, c.baselinePath())
 	fmt.Fprintf(d.stdout, "Baseline sha256: %s\n", b.Digest())
+	if inv.Source == inventory.SourceLocal {
+		fmt.Fprintln(d.stdout, report.DegradedNote)
+	}
 	fmt.Fprintln(d.stdout, "Every device, owner, tag and route below is now accepted. Check that you recognise each one:")
 	fmt.Fprintln(d.stdout)
 	for _, dev := range inv.Devices {
