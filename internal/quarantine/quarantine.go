@@ -13,7 +13,9 @@
 //     in which it reaches nothing. Until that policy is applied, isolate
 //     only relabels the device.
 //   - --deauthorize additionally revokes the device's authorization, which
-//     disconnects it entirely where device approval is enabled.
+//     disconnects it entirely where device approval is enabled. It runs
+//     before the tags change, so a failure part-way never leaves a device
+//     relabelled but still connected.
 //   - Tags do not touch a device's approved subnet routes or exit node.
 //     Routed traffic is allowed by grants to the routed CIDR (or
 //     autogroup:internet), not by the router's own tags, so a quarantined
@@ -79,14 +81,17 @@ const PolicyNote = "tag:quarantine blocks nothing until your tailnet policy deni
 	"apply examples/quarantine-policy.hujson (or its rules) first"
 
 // PlanIsolate plans quarantining d.
+//
+// Deauthorizing, when asked for, comes first. It is the step that actually
+// disconnects the device, including any subnet routes or exit node it
+// serves, which tags do not touch. If a later step then fails, the device is
+// left disconnected but not yet tagged, which is the safer partial state; the
+// other order could leave it tagged, still authorized and still forwarding.
 func PlanIsolate(d inventory.Device, deauthorize bool) (Plan, error) {
 	if d.External {
 		return Plan{}, fmt.Errorf("%s is shared in from outside this tailnet and cannot be tagged here; remove the share in the admin console instead", d.ShortName())
 	}
 	p := Plan{Action: "isolate", Device: d, PreviousTags: copyTags(d.Tags), NewTags: []string{Tag}}
-	if !(len(d.Tags) == 1 && d.Tags[0] == Tag) {
-		p.Steps = append(p.Steps, Step{Kind: SetTags, Tags: []string{Tag}})
-	}
 	if deauthorize {
 		if d.Authorized {
 			p.Steps = append(p.Steps, Step{Kind: SetAuthorized, Authorized: false})
@@ -94,6 +99,9 @@ func PlanIsolate(d inventory.Device, deauthorize bool) (Plan, error) {
 		} else {
 			p.Notes = append(p.Notes, "device is already deauthorized")
 		}
+	}
+	if !(len(d.Tags) == 1 && d.Tags[0] == Tag) {
+		p.Steps = append(p.Steps, Step{Kind: SetTags, Tags: []string{Tag}})
 	}
 	if len(p.Steps) == 0 {
 		p.Notes = append(p.Notes, "device is already quarantined; nothing to do")
