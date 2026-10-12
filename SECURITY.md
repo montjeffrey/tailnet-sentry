@@ -38,8 +38,12 @@ redirects are refused.
   every command, on success and on failure (including an API that echoes the
   key back), and fails if the key appears in stdout, stderr or any file in
   the state directory.
-- Stripped from the environment of the `tailscale` subprocess, which has no
-  use for them.
+- Never passed to the `tailscale` subprocess, which has no use for them. It
+  gets a short fixed allowlist of variables (PATH, home and temp
+  directories, locale), so nothing else in sentry's environment, such as a
+  webhook URL, reaches it either. The CLI is looked up in Tailscale's
+  install locations before `PATH`, and on Unix a copy that other users
+  could replace is refused.
 - OAuth clients are exchanged for a token scoped to the command:
   `devices:core:read` for scan and baseline, and `devices:core` only for
   `isolate --apply` and `release --apply`. The token lives in memory only.

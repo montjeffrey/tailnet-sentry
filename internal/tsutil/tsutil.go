@@ -144,25 +144,37 @@ func convert(p rawPeer, login func(int64) string, self bool) inventory.Device {
 	return d
 }
 
-// childEnv is the environment for the tailscale subprocess: this process's
-// environment minus every credential variable. The CLI never needs an API
-// credential, so there is no reason to hand it one.
+// childEnv is the environment for the tailscale subprocess: only the
+// variables in KeptVars, and never a credential variable even if it were
+// listed. Everything else this process holds (a webhook URL, another tool's
+// token) stays here; the CLI needs none of it to reach its daemon.
 func childEnv(credVars []string) []string {
 	var out []string
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
-		keep := true
-		for _, c := range credVars {
-			if strings.EqualFold(name, c) {
-				keep = false
-				break
-			}
-		}
-		if keep {
+		if containsFold(KeptVars, name) && !containsFold(credVars, name) {
 			out = append(out, kv)
 		}
 	}
 	return out
+}
+
+// KeptVars are the only variables passed to the tailscale subprocess: what a
+// process needs to start and find its home and temp directories on each
+// platform. Names compare case-insensitively, as Windows does.
+var KeptVars = []string{
+	"PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "XDG_RUNTIME_DIR",
+	"SystemRoot", "SystemDrive", "windir", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+	"ProgramData", "ProgramFiles",
+}
+
+func containsFold(list []string, s string) bool {
+	for _, v := range list {
+		if strings.EqualFold(v, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // ScrubbedVars are removed from the subprocess environment. They mirror
@@ -188,25 +200,57 @@ func run(ctx context.Context, args ...string) ([]byte, error) {
 	return out, nil
 }
 
+// binary finds the tailscale CLI. Tailscale's own install locations come
+// first, so a writable directory early in PATH (common under schedulers and
+// service managers) cannot put another program in its place. PATH is only
+// the fallback for installs elsewhere, and on Unix a candidate that anyone
+// but its owner could replace is refused wherever it was found.
 func binary() (string, error) {
-	if p, err := exec.LookPath("tailscale"); err == nil {
-		return p, nil
+	for _, p := range trustedPaths() {
+		if _, err := os.Stat(p); err == nil {
+			return checked(p)
+		}
 	}
+	if p, err := exec.LookPath("tailscale"); err == nil {
+		return checked(p)
+	}
+	return "", errors.New("tailscale CLI not found; install Tailscale and sign in")
+}
+
+// trustedPaths lists where Tailscale's installers put the CLI. It is a
+// variable so tests can point it at a temporary directory.
+var trustedPaths = func() []string {
 	switch runtime.GOOS {
 	case "windows":
+		var out []string
 		// An unset ProgramFiles would make this path relative, and run
 		// whatever tailscale.exe sits in the current directory.
 		if pf := os.Getenv("ProgramFiles"); filepath.IsAbs(pf) {
-			p := filepath.Join(pf, "Tailscale", "tailscale.exe")
-			if _, err := os.Stat(p); err == nil {
-				return p, nil
-			}
+			out = append(out, filepath.Join(pf, "Tailscale", "tailscale.exe"))
 		}
+		return append(out, `C:\Program Files\Tailscale\tailscale.exe`)
 	case "darwin":
-		p := "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+		return []string{"/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"}
+	default:
+		return []string{"/usr/bin/tailscale", "/usr/sbin/tailscale", "/usr/local/bin/tailscale", "/snap/bin/tailscale"}
+	}
+}
+
+// checked returns p unless, on Unix, the file or its directory is writable
+// by group or others. Windows permissions are ACLs that mode bits do not
+// describe, so there the trusted-locations-first order is the protection.
+func checked(p string) (string, error) {
+	if runtime.GOOS == "windows" {
+		return p, nil
+	}
+	for _, q := range []string{p, filepath.Dir(p)} {
+		fi, err := os.Stat(q)
+		if err != nil {
+			return "", fmt.Errorf("tailscale CLI %s: %w", p, err)
+		}
+		if fi.Mode().Perm()&0o022 != 0 {
+			return "", fmt.Errorf("refusing to run the tailscale CLI at %s: %s is writable by other users", p, q)
 		}
 	}
-	return "", errors.New("tailscale CLI not found; install Tailscale and sign in")
+	return p, nil
 }
