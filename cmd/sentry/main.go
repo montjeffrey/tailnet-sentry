@@ -600,19 +600,28 @@ func execute(ctx context.Context, client *tsapi.Client, log *audit.Log, plan qua
 	if err := log.Append(e); err != nil {
 		return fmt.Errorf("not applied, the audit log could not be written: %w", err)
 	}
+	// Each step's outcome goes into the outcome line, so a run that failed
+	// part-way records exactly which changes were made and which were not.
 	var stepErr error
 	for i, s := range plan.Steps {
-		switch s.Kind {
-		case quarantine.SetTags:
-			stepErr = client.SetTags(ctx, plan.Device.ID, s.Tags)
-		case quarantine.SetAuthorized:
-			stepErr = client.SetAuthorized(ctx, plan.Device.ID, s.Authorized)
+		res := audit.StepResult{Step: stepLabel(s), Result: audit.StepSkipped}
+		if stepErr == nil {
+			var err error
+			switch s.Kind {
+			case quarantine.SetTags:
+				err = client.SetTags(ctx, plan.Device.ID, s.Tags)
+			case quarantine.SetAuthorized:
+				err = client.SetAuthorized(ctx, plan.Device.ID, s.Authorized)
+			}
+			if err != nil {
+				stepErr = fmt.Errorf("step %d (%s) failed: %w", i+1, s.Kind, err)
+				res.Result = "error: " + tsapi.Redact(err.Error())
+			} else {
+				res.Result = audit.ResultOK
+				fmt.Fprintf(d.stdout, "done: %s\n", s)
+			}
 		}
-		if stepErr != nil {
-			stepErr = fmt.Errorf("step %d (%s) failed: %w", i+1, s.Kind, stepErr)
-			break
-		}
-		fmt.Fprintf(d.stdout, "done: %s\n", s)
+		e.Steps = append(e.Steps, res)
 	}
 	e.Time = d.now().UTC()
 	e.Result = audit.ResultOK
@@ -631,6 +640,17 @@ func execute(ctx context.Context, client *tsapi.Client, log *audit.Log, plan qua
 	}
 	fmt.Fprintf(d.stdout, "\n%s applied to %s; recorded in %s\n", plan.Action, report.Clean(plan.Device.ShortName()), log.Path())
 	return nil
+}
+
+// stepLabel names a step for the audit log, with the value it sets.
+func stepLabel(s quarantine.Step) string {
+	switch s.Kind {
+	case quarantine.SetTags:
+		return s.Kind + "=" + strings.Join(s.Tags, ",")
+	case quarantine.SetAuthorized:
+		return fmt.Sprintf("%s=%t", s.Kind, s.Authorized)
+	}
+	return s.Kind
 }
 
 func printPlan(w io.Writer, p quarantine.Plan) {

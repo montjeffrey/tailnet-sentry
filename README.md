@@ -187,7 +187,9 @@ Limits:
   get them back.
 - **Deauthorize.** `--deauthorize` revokes the device's authorization. It is the stronger cut where
   [device approval](https://tailscale.com/docs/features/access-control/device-management/device-approval)
-  is enabled.
+  is enabled. It runs before the tags change, so if a later step fails the device is left
+  disconnected rather than relabelled but still connected. The audit log's outcome line records
+  each step as `ok`, `error: ...` or `skipped`.
 - **Subnet routers and exit nodes.** Tags do not revoke a device's approved routes. Routed
   traffic is allowed by grants to the routed CIDR (or `autogroup:internet`), not by the router's
   own tags, so a quarantined router can keep forwarding. The plan warns you; use `--deauthorize`,

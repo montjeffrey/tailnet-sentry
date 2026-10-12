@@ -57,8 +57,21 @@ type Entry struct {
 	Reason       string    `json:"reason,omitempty"`
 	Operator     string    `json:"operator"`
 	Result       string    `json:"result"`
-	Prev         string    `json:"prev"`
+	// Steps holds, on an apply's outcome line, what happened to each planned
+	// API call in order, so a run that failed part-way shows exactly which
+	// changes were made.
+	Steps []StepResult `json:"steps,omitempty"`
+	Prev  string       `json:"prev"`
 }
+
+// StepResult is the outcome of one planned API call.
+type StepResult struct {
+	Step   string `json:"step"`   // e.g. "set-authorized", "set-tags"
+	Result string `json:"result"` // ResultOK, "error: ...", or StepSkipped
+}
+
+// StepSkipped marks a step not attempted because an earlier one failed.
+const StepSkipped = "skipped"
 
 // Log is an audit file.
 type Log struct{ path string }

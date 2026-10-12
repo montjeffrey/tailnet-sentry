@@ -51,9 +51,10 @@ type fakeAPI struct {
 	mu       sync.Mutex
 	devices  []apiDev
 	writes   []string
-	fail     int    // forced status for writes
-	failMsg  string // body for forced failures
-	failPath string // when set, only writes to paths ending in this fail
+	attempts []string // every write's path, in order, including forced failures
+	fail     int      // forced status for writes
+	failMsg  string   // body for forced failures
+	failPath string   // when set, only writes to paths ending in this fail
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -67,6 +68,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/devices":
 		_ = json.NewEncoder(w).Encode(map[string]any{"devices": f.devices})
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/device/"):
+		f.attempts = append(f.attempts, r.URL.Path)
 		if f.fail != 0 && (f.failPath == "" || strings.HasSuffix(r.URL.Path, f.failPath)) {
 			w.WriteHeader(f.fail)
 			_, _ = io.WriteString(w, f.failMsg)
@@ -103,6 +105,24 @@ func (f *fakeAPI) getWrites() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.writes...)
+}
+
+func (f *fakeAPI) getAttempts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.attempts...)
+}
+
+// device returns the fake API's current record of nodeID.
+func (f *fakeAPI) device(nodeID string) apiDev {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, d := range f.devices {
+		if d["nodeId"] == nodeID {
+			return d
+		}
+	}
+	return nil
 }
 
 type harness struct {
@@ -287,8 +307,8 @@ func TestIsolateApplyThenRelease(t *testing.T) {
 		t.Fatalf("isolate: exit %d\n%s%s", code, out, errOut)
 	}
 	want := []string{
-		`/device/nKALICNTRL/tags {"tags":["tag:quarantine"]}`,
 		`/device/nKALICNTRL/authorized {"authorized":false}`,
+		`/device/nKALICNTRL/tags {"tags":["tag:quarantine"]}`,
 	}
 	if got := h.api.getWrites(); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("writes:\n%s", strings.Join(got, "\n"))
@@ -515,14 +535,14 @@ func TestBaselineAcceptOneDevice(t *testing.T) {
 func TestIsolatePartialFailureThenRetryThenRelease(t *testing.T) {
 	h := newHarness(t)
 	h.api.add(intruder())
-	// Tags are replaced, then deauthorize fails.
-	h.api.fail, h.api.failPath, h.api.failMsg = http.StatusInternalServerError, "/authorized", `{"message":"try again"}`
+	// The device is deauthorized, then replacing its tags fails.
+	h.api.fail, h.api.failPath, h.api.failMsg = http.StatusInternalServerError, "/tags", `{"message":"try again"}`
 	code, _, errOut := h.run("isolate", "kali", "--apply", "--deauthorize")
-	if code != exitError || !strings.Contains(errOut, "step 2 (set-authorized) failed") {
+	if code != exitError || !strings.Contains(errOut, "step 2 (set-tags) failed") {
 		t.Fatalf("partial failure: exit %d %s", code, errOut)
 	}
-	// The retry only needs to deauthorize; it sees tag:quarantine as the
-	// device's current tags.
+	// The retry only needs to tag; it sees the device as already
+	// deauthorized.
 	h.api.fail = 0
 	if code, out, errOut := h.run("isolate", "kali", "--apply", "--deauthorize"); code != exitClean {
 		t.Fatalf("retry: exit %d\n%s%s", code, out, errOut)
