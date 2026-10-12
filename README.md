@@ -55,7 +55,9 @@ they are configured.
    - **`api`**: `GET /api/v2/tailnet/{tailnet}/devices?fields=all`. The whole tailnet, every field.
      It needs a credential (see [Token scopes](#token-scopes)).
    - **`local`**: `tailscale status --json`. It needs no credential and is read-only, but it only
-     sees the peers this device's policy lets it see, and fewer fields per peer.
+     sees the peers this device's policy lets it see, and fewer fields per peer. Its reports are
+     labelled `DEGRADED` (`"degraded": true` in JSON), and recording a baseline from it needs
+     `--allow-partial`. Use the API for production monitoring.
    - `--source auto` (the default) uses the API when credentials are set, else the local daemon.
 2. **Baseline.** `sentry baseline` records the known-good state of each device to a local JSON
    file: id, name, owner, OS, tags, addresses, client version, key expiry, authorization,
@@ -103,8 +105,8 @@ in for it.
 No credentials, nothing changed:
 
 ```bash
-sentry baseline --source local      # review the list it prints: it is now "known good"
-sentry scan --source local          # exit 0 = all healthy
+sentry baseline --source local --allow-partial   # review the list it prints: it is now "known good"
+sentry scan --source local                       # exit 0 = all healthy (of the devices it can see)
 ```
 
 With the API, which sees every device:

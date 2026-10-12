@@ -267,7 +267,7 @@ func TestBaselineRefusesToOverwrite(t *testing.T) {
 func TestLocalSourceNeedsNoCredentials(t *testing.T) {
 	h := newHarness(t)
 	h.env = map[string]string{}
-	if code, out, errOut := h.run("baseline"); code != exitClean || !strings.Contains(out, "from the local source") {
+	if code, out, errOut := h.run("baseline", "--allow-partial"); code != exitClean || !strings.Contains(out, "from the local source") {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
 	}
 	if code, out, _ := h.run("scan"); code != exitClean || !strings.Contains(out, "source: local") {
