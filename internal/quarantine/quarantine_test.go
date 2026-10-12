@@ -38,7 +38,8 @@ func TestPlanIsolate(t *testing.T) {
 	}{
 		{"user-owned", device(), false, "tags=tag:quarantine", "release cannot give it back"},
 		{"tagged replaces all tags", device("tag:server", "tag:prod"), false, "tags=tag:quarantine", "restore [tag:server, tag:prod]"},
-		{"deauthorize", device("tag:ci"), true, "tags=tag:quarantine deauthorize", PolicyNote},
+		{"deauthorize comes first", device("tag:ci"), true, "deauthorize tags=tag:quarantine", PolicyNote},
+		{"deauthorize an already-tagged device", device("tag:quarantine"), true, "deauthorize", PolicyNote},
 		{"already quarantined", device("tag:quarantine"), false, "", "already quarantined"},
 		{"quarantined but other tags too", device("tag:quarantine", "tag:server"), false, "tags=tag:quarantine", ""},
 		{"already deauthorized", func() inventory.Device { d := device("tag:quarantine"); d.Authorized = false; return d }(), true, "", "already deauthorized"},
