@@ -287,14 +287,20 @@ OnCalendar=*:0/30
 WantedBy=timers.target
 ```
 
-**Windows Task Scheduler**, with the client stored as user environment variables. See
-[`examples/schedule/sentry-scan.ps1`](examples/schedule/sentry-scan.ps1):
+**Windows Task Scheduler**, with the client stored as user environment variables. Put
+[`examples/schedule/sentry-scan.ps1`](examples/schedule/sentry-scan.ps1) next to `sentry.exe`. It
+writes `alerts.log` and shows a Windows notification on exit 1 or 2:
 
 ```powershell
-$action  = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument '-NoProfile -File C:\tools\sentry-scan.ps1'
+$script  = 'C:\tools\tailnet-sentry\sentry-scan.ps1'
+$action  = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$script`""
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
 Register-ScheduledTask -TaskName 'tailnet-sentry scan' -Action $action -Trigger $trigger
 ```
+
+The task runs under Windows PowerShell 5.1, whose path never changes (a Microsoft Store install of
+`pwsh` moves on every update). `conhost --headless` keeps a console window from flashing up on each
+run. The script's header has the full registration, including a logon trigger and run limits.
 
 ## Threat model
 
