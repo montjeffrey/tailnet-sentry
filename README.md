@@ -379,8 +379,9 @@ off the host sees a baseline change even if the host is lying.
 
 | Path (under `--state-dir`) | What |
 | --- | --- |
-| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically, sealed with its own `sha256` |
+| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically, sealed with its own `sha256`; refused if over 64 MiB |
 | `audit.jsonl` | one JSON line per isolate or release (dry runs too), opened append-only and hash-chained (tamper-evident except at the tail); check it with `sentry audit verify` |
+| `audit.jsonl.lock` | empty; held while an entry is appended, so sentry runs at the same moment take turns instead of forking the chain |
 
 The default state directory is your user config directory: `%APPDATA%\tailnet-sentry`,
 `~/.config/tailnet-sentry` or `~/Library/Application Support/tailnet-sentry`. Both files describe
