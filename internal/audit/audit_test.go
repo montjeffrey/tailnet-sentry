@@ -101,6 +101,14 @@ func withTags(e Entry, tags ...string) Entry { e.PreviousTags = tags; return e }
 
 func withDeauth(e Entry) Entry { e.Deauthorize = true; return e }
 
+// withSteps adds step results given as step, result pairs.
+func withSteps(e Entry, pairs ...string) Entry {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		e.Steps = append(e.Steps, StepResult{Step: pairs[i], Result: pairs[i+1]})
+	}
+	return e
+}
+
 func TestOpenIsolation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -124,6 +132,20 @@ func TestOpenIsolation(t *testing.T) {
 			withTags(withDeauth(entry(ActionIsolate, ModeApply, ResultOK)), "tag:quarantine"),
 		}, wantTags: "tag:ci", wantDeath: true},
 		{name: "interrupted after intent", entries: []Entry{entry(ActionIsolate, ModeApply, ResultIntent)}, wantTags: "tag:ci"},
+		// Only a deauthorize the log shows succeeding lets release re-approve.
+		{name: "deauthorize failed", entries: []Entry{
+			withDeauth(entry(ActionIsolate, ModeApply, ResultIntent)),
+			withSteps(withDeauth(entry(ActionIsolate, ModeApply, "error: step 1 failed")),
+				StepDeauthorize, "error: 500", "set-tags=tag:quarantine", StepSkipped),
+		}, wantTags: "tag:ci"},
+		{name: "deauthorized then tags failed", entries: []Entry{
+			withDeauth(entry(ActionIsolate, ModeApply, ResultIntent)),
+			withSteps(withDeauth(entry(ActionIsolate, ModeApply, "error: step 2 failed")),
+				StepDeauthorize, ResultOK, "set-tags=tag:quarantine", "error: 500"),
+		}, wantTags: "tag:ci", wantDeath: true},
+		{name: "interrupted after deauthorize intent", entries: []Entry{
+			withDeauth(entry(ActionIsolate, ModeApply, ResultIntent)),
+		}, wantTags: "tag:ci"},
 		{name: "released", entries: []Entry{
 			entry(ActionIsolate, ModeApply, ResultOK), entry(ActionRelease, ModeApply, ResultOK),
 		}, wantNil: true},
