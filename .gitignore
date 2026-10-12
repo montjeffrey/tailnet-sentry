@@ -1,0 +1,11 @@
+# Built binaries
+/sentry
+/sentry.exe
+/dist/
+
+# Local state, if --state-dir points inside the repo. These describe your
+# tailnet and must never be committed.
+baseline.json
+audit.jsonl
+.env
+*.env

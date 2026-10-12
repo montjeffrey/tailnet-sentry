@@ -1,0 +1,87 @@
+// tailnet-sentry: a tailnet policy in which tag:quarantine reaches nothing.
+//
+// `sentry isolate` only RELABELS a device: it replaces the device's tags with
+// tag:quarantine. That changes nothing on the network until the policy below
+// (or its rules, merged into yours) is applied in the admin console under
+// Access controls. Apply it, and save it, BEFORE you need it.
+//
+// Why this works:
+//   * Tailscale denies everything that no rule allows. The rule that matters
+//     here is an absence: nothing below names tag:quarantine (or "*", or
+//     autogroup:tagged) as a source or destination.
+//   * Tagging a device removes its user identity, so rules written for users
+//     (autogroup:member, user logins, groups) stop matching it the moment
+//     sentry tags it. Replacing ALL its tags removes the rules for its old
+//     tags too.
+//   * Filters are enforced by the receiving device, from policy pushed by the
+//     control plane, so a compromised quarantined device cannot opt out.
+//
+// Check your existing policy for these, which would still let a quarantined
+// device through:
+//   * the default allow-all rule: {"src": ["*"], "dst": ["*"], "ip": ["*"]}
+//     (or the legacy ACL {"action": "accept", "src": ["*"], "dst": ["*:*"]})
+//   * any grant, ACL or SSH rule whose src is "*" or "autogroup:tagged"
+//   * any tagOwners entry that lets a non-admin apply tag:quarantine
+//
+// The "tests" section makes the admin console refuse any future edit that
+// would let tag:quarantine reach your devices. Replace YOUR-LOGIN@github with
+// your own login (shown on the Users page) before saving.
+{
+	"tagOwners": {
+		// Only admins may apply the tag. sentry's credential must be able to
+		// apply it: an admin's API access token, or an OAuth client created
+		// with the devices:core scope and tag:quarantine selected.
+		"tag:quarantine": ["autogroup:admin"],
+
+		// Your other tags, unchanged. Example:
+		// "tag:server": ["autogroup:admin"],
+	},
+
+	"grants": [
+		// Your own devices can reach each other. A quarantined device is no
+		// longer owned by a user, so this stops applying to it.
+		{"src": ["autogroup:member"], "dst": ["autogroup:member"], "ip": ["*"]},
+
+		// Tagged servers: name each tag explicitly; never use "*" or
+		// autogroup:tagged here.
+		// {"src": ["autogroup:member"], "dst": ["tag:server"], "ip": ["*"]},
+
+		// Deliberately absent: any grant with tag:quarantine as src or dst.
+		// For forensics, you may temporarily add a narrow, admin-only grant
+		// INTO the quarantined device, e.g.:
+		// {"src": ["YOUR-LOGIN@github"], "dst": ["tag:quarantine"], "ip": ["tcp:22"]},
+	],
+
+	"ssh": [
+		// Tailscale SSH for your own devices. autogroup:self never matches a
+		// tagged (and so a quarantined) device.
+		{
+			"action": "check",
+			"src":    ["autogroup:member"],
+			"dst":    ["autogroup:self"],
+			"users":  ["autogroup:nonroot", "root"],
+		},
+	],
+
+	"tests": [
+		// A quarantined device reaches none of your devices, on any port
+		// commonly used to pivot. Add your tagged servers too, e.g.
+		// "tag:server:22".
+		{
+			"src":  "tag:quarantine",
+			"deny": [
+				"YOUR-LOGIN@github:22",
+				"YOUR-LOGIN@github:80",
+				"YOUR-LOGIN@github:443",
+				"YOUR-LOGIN@github:445",
+				"YOUR-LOGIN@github:3389",
+				"YOUR-LOGIN@github:5900",
+			],
+		},
+		// And your own devices can still reach each other.
+		{
+			"src":    "YOUR-LOGIN@github",
+			"accept": ["YOUR-LOGIN@github:22"],
+		},
+	],
+}

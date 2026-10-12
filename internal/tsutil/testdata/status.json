@@ -1,0 +1,56 @@
+{
+  "Version": "1.102.2-t6cac91817-g6ff0ddc72",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+  "Self": {
+    "ID": "nDESKTOPCNTRL",
+    "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000001",
+    "HostName": "DESKTOP",
+    "DNSName": "desktop.example-tailnet.ts.net.",
+    "OS": "windows",
+    "UserID": 42,
+    "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+    "AllowedIPs": ["100.64.0.1/32", "fd7a:115c:a1e0::1/128"],
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false,
+    "Active": false,
+    "LastSeen": "0001-01-01T00:00:00Z",
+    "KeyExpiry": "2027-01-10T18:00:00Z"
+  },
+  "Peer": {
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000002": {
+      "ID": "nLAPTOPCNTRL",
+      "HostName": "LAPTOP",
+      "DNSName": "laptop.example-tailnet.ts.net.",
+      "OS": "windows",
+      "UserID": 42,
+      "TailscaleIPs": ["100.64.0.2", "fd7a:115c:a1e0::2"],
+      "Online": false,
+      "ExitNodeOption": false,
+      "LastSeen": "2026-10-11T22:15:00Z",
+      "KeyExpiry": "2026-12-01T09:00:00Z"
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000003": {
+      "ID": "nNASCNTRL",
+      "HostName": "nas",
+      "DNSName": "nas.example-tailnet.ts.net.",
+      "OS": "linux",
+      "UserID": 7000,
+      "TailscaleIPs": ["100.64.0.3", "fd7a:115c:a1e0::3"],
+      "Tags": ["tag:server"],
+      "PrimaryRoutes": ["192.168.1.0/24"],
+      "ExitNodeOption": true,
+      "Online": true,
+      "LastSeen": "0001-01-01T00:00:00Z"
+    }
+  },
+  "User": {
+    "42": {"ID": 42, "LoginName": "alice@github", "DisplayName": "Alice"},
+    "7000": {"ID": 7000, "LoginName": "tagged-devices", "DisplayName": "Tagged Devices"}
+  },
+  "CurrentTailnet": {"Name": "example-tailnet.ts.net", "MagicDNSSuffix": "example-tailnet.ts.net", "MagicDNSEnabled": true}
+}

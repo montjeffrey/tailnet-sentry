@@ -1,0 +1,4 @@
+# LF everywhere, so shell scripts run on Linux after a Windows checkout and
+# gofmt sees the same bytes on every platform.
+* text=auto eol=lf
+*.ps1 text eol=crlf

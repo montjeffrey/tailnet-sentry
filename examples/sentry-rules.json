@@ -1,0 +1,9 @@
+{
+  "allowedOwners": [],
+  "allowedTags": ["tag:server"],
+  "allowedRoutes": [],
+  "expiryWarnDays": 14,
+  "staleDays": 30,
+  "minClientVersion": "1.90.0",
+  "disabled": []
+}

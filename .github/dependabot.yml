@@ -1,0 +1,12 @@
+# Keeps the SHA-pinned actions and Go modules current. Dependabot updates a
+# pinned SHA and its version comment together, so pinning costs no freshness.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
