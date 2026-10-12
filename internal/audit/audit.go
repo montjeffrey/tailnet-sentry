@@ -73,6 +73,9 @@ type StepResult struct {
 // StepSkipped marks a step not attempted because an earlier one failed.
 const StepSkipped = "skipped"
 
+// StepDeauthorize is the label of an isolate's deauthorize step.
+const StepDeauthorize = "set-authorized=false"
+
 // Log is an audit file.
 type Log struct{ path string }
 
@@ -196,8 +199,10 @@ type Isolation struct {
 // The tags to restore come from the FIRST applied isolate in that span,
 // whatever its result: its intent line is written before anything changes,
 // so it holds the original tags even if the run then failed half-way. A
-// later retry would only record tag:quarantine. Deauthorized is set if any
-// applied isolate in the span asked to deauthorize.
+// later retry would only record tag:quarantine. Deauthorized is set only if
+// an outcome line in the span shows the deauthorize step succeeded: release
+// re-approves on the strength of it, and must not approve a device that
+// someone else disconnected after sentry's own attempt failed.
 func OpenIsolation(path, deviceID string) (*Isolation, error) {
 	entries, err := Read(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -216,7 +221,7 @@ func OpenIsolation(path, deviceID string) (*Isolation, error) {
 			if open == nil {
 				open = &Isolation{Since: e.Time, PreviousTags: e.PreviousTags}
 			}
-			open.Deauthorized = open.Deauthorized || e.Deauthorize
+			open.Deauthorized = open.Deauthorized || deauthorized(e)
 		case ActionRelease:
 			if e.Result == ResultOK {
 				open = nil
@@ -224,6 +229,26 @@ func OpenIsolation(path, deviceID string) (*Isolation, error) {
 		}
 	}
 	return open, nil
+}
+
+// deauthorized reports whether e records a deauthorize that took effect.
+// Intent lines are written before anything changes, so they never count; a
+// run interrupted after one leaves release to the operator's --reauthorize.
+// Outcome lines written before per-step results existed ran deauthorize as
+// the last step, so only a fully successful one did it.
+func deauthorized(e Entry) bool {
+	if !e.Deauthorize || e.Result == ResultIntent {
+		return false
+	}
+	if len(e.Steps) == 0 {
+		return e.Result == ResultOK
+	}
+	for _, s := range e.Steps {
+		if s.Step == StepDeauthorize {
+			return s.Result == ResultOK
+		}
+	}
+	return false
 }
 
 func lastLine(data []byte) []byte {
