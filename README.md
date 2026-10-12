@@ -78,11 +78,20 @@ From source (Go 1.26+):
 go install github.com/montjeffrey/tailnet-sentry/cmd/sentry@latest
 ```
 
-Or download a release binary and verify where it came from:
+Or download a [release](https://github.com/montjeffrey/tailnet-sentry/releases) binary and verify
+it. Run these in the folder you download to; pick your platform's file (`sentry-linux-amd64`,
+`sentry-darwin-arm64`, `sentry-windows-amd64.exe`, ...):
 
 ```bash
+gh release download --repo montjeffrey/tailnet-sentry --pattern sentry-linux-amd64 --pattern SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
 gh attestation verify sentry-linux-amd64 --repo montjeffrey/tailnet-sentry
 ```
+
+`gh attestation verify` checks a file you already have on disk. It proves the binary was built
+from this repository by its release workflow. On Windows, compare `Get-FileHash` with the file's
+line in `SHA256SUMS` instead of running `sha256sum`. Then rename the binary to `sentry` (or
+`sentry.exe`) and put it on your `PATH`.
 
 The binary has no dependencies beyond the Go standard library. The `local` source and the
 isolate self-check need the `tailscale` CLI on `PATH` (or in its default install location).
