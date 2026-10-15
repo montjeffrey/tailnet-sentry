@@ -217,6 +217,7 @@ used to hide a device that still has access.
 | `key-expiry-disabled` | medium | key expiry was turned off since the baseline (or on a new device) | api, local |
 | `key-expiring` | medium | the key expires within `expiryWarnDays` (default 14) | api, local |
 | `client-outdated` | medium | the client is older than `minClientVersion` | api (local: own device only) |
+| `client-changed` | medium | a known device's client went *down* a version, or is a different build of the same version (upgrades stay quiet) | api (local: own device only) |
 | `stale` | low | offline and not seen for `staleDays` (default 30) | api, local |
 | `update-available` | low | Tailscale reports a client update | api |
 
@@ -302,6 +303,31 @@ The task runs under Windows PowerShell 5.1, whose path never changes (a Microsof
 `pwsh` moves on every update). `conhost --headless` keeps a console window from flashing up on each
 run. The script's header has the full registration, including a logon trigger and run limits.
 
+## Protecting the baseline
+
+The baseline is what "healthy" means, so whoever can edit it can make a rogue device look healthy.
+Two layers, of different strength:
+
+- **Seal (automatic).** `baseline.json` carries a `sha256` of its own content. `scan` refuses a file
+  that fails it (exit 2), which catches corruption and hand edits. It does **not** stop someone who
+  can write the file from recomputing the seal. After an edit you made on purpose, run
+  `sentry baseline --reseal`; it prints the old and new digests. Baselines written before seals
+  existed still load, with a note on stderr.
+- **Pin (you opt in).** Record the digest where the state directory's writers cannot reach, and
+  `scan` will refuse any other baseline, even a correctly resealed one:
+
+  ```bash
+  sentry baseline --digest                    # prints the sha256
+  sentry scan --baseline-sha256 <digest>      # or env SENTRY_BASELINE_SHA256
+  ```
+
+  Keep the digest in the scheduler's configuration or a password manager, not next to the baseline.
+  `baseline`, `baseline --accept` and `--reseal` print the new digest; update the pin when you
+  change the baseline on purpose.
+
+Every `--json` report and webhook carries `baseline.sha256` and `baseline.sealed`, so a collector
+off the host sees a baseline change even if the host is lying.
+
 ## Threat model
 
 **What it catches**
@@ -327,7 +353,8 @@ run. The script's header has the full registration, including a logon trigger an
   quarantine work, re-tag devices, or delete them. A read-only scanning credential limits what a
   leak of *sentry's* credential can do, but not what a stolen admin account can.
 - **Tampering on the sentry host.** Someone who can write the state directory can edit the baseline
-  to accept their device. The audit log is hash-chained: `sentry audit verify` detects a changed,
+  to accept their device, and recompute its seal. Only a [pinned digest](#protecting-the-baseline)
+  kept off that host, or the digest in off-host reports, exposes that. The audit log is hash-chained: `sentry audit verify` detects a changed,
   removed or inserted line, except at the very end (truncating the tail, or editing the last line,
   leaves no trace), and not a full rewrite. `release` refuses to trust a log that fails
   verification. Run sentry on a machine you trust, and ship reports off-host (the webhook, or
@@ -344,7 +371,7 @@ run. The script's header has the full registration, including a logon trigger an
 
 | Path (under `--state-dir`) | What |
 | --- | --- |
-| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically |
+| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically, sealed with its own `sha256` |
 | `audit.jsonl` | one JSON line per isolate or release (dry runs too), opened append-only and hash-chained (tamper-evident except at the tail); check it with `sentry audit verify` |
 
 The default state directory is your user config directory: `%APPDATA%\tailnet-sentry`,

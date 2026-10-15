@@ -217,6 +217,27 @@ func TestClientOutdated(t *testing.T) {
 	})
 }
 
+func TestClientChanged(t *testing.T) {
+	runCases(t, ClientChanged, []ruleCase{
+		{name: "unchanged", known: laptopRecord()},
+		{name: "new device", dev: func(d *inventory.Device) { d.ClientVersion = "1.50.0" }},
+		{name: "routine upgrade", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.104.0-tdef" }},
+		{name: "patch upgrade", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.102.3-tdef" }},
+		{name: "downgrade", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.90.1-tabc" },
+			want: "downgraded from 1.102.2 to 1.90.1"},
+		{name: "patch downgrade", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.102.1-tabc" },
+			want: "downgraded from 1.102.2 to 1.102.1"},
+		{name: "same version, different build", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.102.2-tevil" },
+			want: "different build of 1.102.2: 1.102.2-tevil, was 1.102.2-tabc"},
+		{name: "same version, one side has no suffix", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "1.102.2" },
+			want: "different build"},
+		{name: "source cannot see version", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "" }},
+		{name: "baseline has no version", dev: func(d *inventory.Device) { d.ClientVersion = "1.0.0" },
+			known: func() *baseline.Record { r := laptopRecord(); r.ClientVersion = ""; return r }()},
+		{name: "unparseable is unknown, not bad", known: laptopRecord(), dev: func(d *inventory.Device) { d.ClientVersion = "nightly" }},
+	})
+}
+
 func TestStale(t *testing.T) {
 	offline := func(age int) func(*inventory.Device) {
 		return func(d *inventory.Device) { d.Online = false; d.LastSeen = now.Add(-days(age)) }
