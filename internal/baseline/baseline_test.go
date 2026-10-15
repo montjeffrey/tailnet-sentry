@@ -1,6 +1,7 @@
 package baseline
 
 import (
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -73,6 +74,102 @@ func TestSaveRefusesToOverwrite(t *testing.T) {
 	}
 	if err := Save(path, b, true); err != nil {
 		t.Errorf("overwrite: %v", err)
+	}
+}
+
+func TestSaveSealsAndLoadVerifies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	b := FromInventory(sampleInventory(), now)
+	if err := Save(path, b, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Sealed() || got.Seal != b.Digest() || got.Digest() != b.Digest() {
+		t.Errorf("seal %q, digest %q, want both %q", got.Seal, got.Digest(), b.Digest())
+	}
+	if len(b.Digest()) != 64 {
+		t.Errorf("digest %q is not a hex sha256", b.Digest())
+	}
+}
+
+func TestEditedBaselineFailsItsSeal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := Save(path, FromInventory(sampleInventory(), now), false); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	for name, edit := range map[string]func(string) string{
+		"owner changed": func(s string) string { return strings.Replace(s, "alice@github", "mallory@example.com", 1) },
+		"id changed":    func(s string) string { return strings.Replace(s, `"id": "nB"`, `"id": "nX"`, 1) },
+		"tag changed":   func(s string) string { return strings.Replace(s, "tag:server", "tag:admin", 1) },
+	} {
+		edited := edit(string(data))
+		if edited == string(data) {
+			t.Fatalf("%s: edit changed nothing", name)
+		}
+		p := filepath.Join(t.TempDir(), "edited.json")
+		if err := os.WriteFile(p, []byte(edited), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p); !errors.Is(err, ErrTampered) {
+			t.Errorf("%s: Load = %v, want ErrTampered", name, err)
+		}
+		if _, err := LoadUnverified(p); err != nil {
+			t.Errorf("%s: LoadUnverified = %v, want it to read the file anyway", name, err)
+		}
+	}
+}
+
+func TestUnsealedBaselineLoadsAndHasTheSameDigest(t *testing.T) {
+	b := FromInventory(sampleInventory(), now)
+	sealed := filepath.Join(t.TempDir(), "baseline.json")
+	if err := Save(sealed, b, false); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(sealed)
+	// Rewrite the file the way a sentry from before seals existed saved it.
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "sha256")
+	legacy, _ := json.MarshalIndent(raw, "", "  ")
+	p := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(p, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("a baseline from before seals must load: %v", err)
+	}
+	if got.Sealed() {
+		t.Error("legacy baseline claims to be sealed")
+	}
+	if got.Digest() != b.Digest() {
+		t.Errorf("digest changed with the seal: %s vs %s", got.Digest(), b.Digest())
+	}
+}
+
+func TestCheckPin(t *testing.T) {
+	b := FromInventory(sampleInventory(), now)
+	d := b.Digest()
+	for _, ok := range []string{d, " " + d + "\n", "sha256:" + d, strings.ToUpper(d), "SHA256:" + strings.ToUpper(d)} {
+		if err := b.CheckPin(ok); err != nil {
+			t.Errorf("CheckPin(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "0000", d[:63], strings.Repeat("0", 64)} {
+		if err := b.CheckPin(bad); !errors.Is(err, ErrPinMismatch) {
+			t.Errorf("CheckPin(%q) = %v, want ErrPinMismatch", bad, err)
+		}
+	}
+	changed := FromInventory(sampleInventory(), now)
+	changed.Put(Record{ID: "nNEW", Owner: "mallory@example.com"})
+	if err := changed.CheckPin(d); !errors.Is(err, ErrPinMismatch) {
+		t.Errorf("adding a device kept the digest: %v", err)
 	}
 }
 
