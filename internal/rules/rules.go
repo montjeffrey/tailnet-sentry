@@ -116,6 +116,7 @@ func All() []Rule {
 		{"key-expiry-disabled", Medium, "node key was set never to expire", KeyExpiryDisabled},
 		{"key-expiring", Medium, "node key expires soon", KeyExpiring},
 		{"client-outdated", Medium, "Tailscale client is older than the minimum", ClientOutdated},
+		{"client-changed", Medium, "client was downgraded, or is a different build of the same version", ClientChanged},
 		{"stale", Low, "device has not been seen for a long time", Stale},
 		{"update-available", Low, "a Tailscale client update is available", UpdateAvailable},
 	}
@@ -299,6 +300,28 @@ func ClientOutdated(env Env, d inventory.Device, _ *baseline.Record) []string {
 		return nil
 	}
 	return []string{fmt.Sprintf("client %s is older than %s", shortVersion(d.ClientVersion), env.Config.MinClientVersion)}
+}
+
+// ClientChanged fires when a known device's client went backwards, or is a
+// different build of the same version number. Upgrades are routine and stay
+// quiet; a downgrade can reinstall a vulnerable client, and two builds that
+// share a version but not a commit suffix means the binary is not the one
+// that was accepted. Versions that cannot be parsed are never reported.
+func ClientChanged(_ Env, d inventory.Device, known *baseline.Record) []string {
+	if known == nil || known.ClientVersion == "" || d.ClientVersion == "" || known.ClientVersion == d.ClientVersion {
+		return nil
+	}
+	was, okWas := parseVersion(known.ClientVersion)
+	have, okHave := parseVersion(d.ClientVersion)
+	switch {
+	case !okWas || !okHave:
+		return nil
+	case versionLess(have, was):
+		return []string{fmt.Sprintf("client downgraded from %s to %s", shortVersion(known.ClientVersion), shortVersion(d.ClientVersion))}
+	case !versionLess(was, have): // same number, different string
+		return []string{fmt.Sprintf("client is a different build of %s: %s, was %s", shortVersion(d.ClientVersion), d.ClientVersion, known.ClientVersion)}
+	}
+	return nil
 }
 
 // Stale fires for an offline device last seen more than StaleDays ago.

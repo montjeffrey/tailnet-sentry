@@ -512,6 +512,150 @@ func TestBaselineAcceptOneDevice(t *testing.T) {
 	}
 }
 
+func TestScanFlagsClientDowngradeButNotUpgrade(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+
+	h.api.devices[0]["clientVersion"] = "1.103.0"
+	if code, out, _ := h.run("scan"); code != exitClean {
+		t.Fatalf("a routine upgrade must stay quiet: exit %d\n%s", code, out)
+	}
+	h.api.devices[0]["clientVersion"] = "1.90.0"
+	code, out, _ := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "client-changed") || !strings.Contains(out, "downgraded from 1.102.2 to 1.90.0") {
+		t.Errorf("downgrade: exit %d\n%s", code, out)
+	}
+}
+
+// digestFrom pulls the hex digest out of a "Baseline sha256: ..." line.
+func digestFrom(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if rest, ok := strings.CutPrefix(line, "Baseline sha256: "); ok {
+			if f := strings.Fields(rest); len(f) > 0 && len(f[0]) == 64 {
+				return f[0]
+			}
+		}
+	}
+	t.Fatalf("no digest in output:\n%s", out)
+	return ""
+}
+
+func (h *harness) baselineFile() string { return filepath.Join(h.stateDir, "baseline.json") }
+
+// tamper swaps the owner of every record in the baseline file, as someone
+// editing it by hand would, leaving the stored seal alone.
+func (h *harness) tamper() {
+	h.t.Helper()
+	data, err := os.ReadFile(h.baselineFile())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	edited := strings.ReplaceAll(string(data), "alice@github", "mallory@example.com")
+	if edited == string(data) {
+		h.t.Fatal("tamper changed nothing")
+	}
+	if err := os.WriteFile(h.baselineFile(), []byte(edited), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func TestHandEditedBaselineIsRefusedUntilResealed(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.tamper()
+
+	code, out, errOut := h.run("scan")
+	if code != exitError || !strings.Contains(errOut, "integrity check") || strings.Contains(out, "healthy") {
+		t.Fatalf("tampered baseline: exit %d\nstdout:%s\nstderr:%s", code, out, errOut)
+	}
+	// --digest must still work on the bad file, so the operator can look.
+	if code, out, errOut := h.run("baseline", "--digest"); code != exitClean || len(strings.TrimSpace(out)) != 64 {
+		t.Errorf("--digest on a tampered file: exit %d\n%s%s", code, out, errOut)
+	}
+	code, out, errOut = h.run("baseline", "--reseal")
+	if code != exitClean || !strings.Contains(out, "stored seal did not match") {
+		t.Fatalf("reseal: exit %d\n%s%s", code, out, errOut)
+	}
+	// Resealing blesses the file; it does not hide that the live tailnet
+	// no longer matches what the file now says.
+	if code, out, _ := h.run("scan"); code != exitAnomalies || !strings.Contains(out, "unexpected-owner") {
+		t.Errorf("after reseal: exit %d\n%s", code, out)
+	}
+}
+
+func TestPinnedBaselineSurvivesARecomputedSeal(t *testing.T) {
+	h := newHarness(t)
+	code, out, errOut := h.run("baseline")
+	if code != exitClean {
+		t.Fatalf("baseline: exit %d\n%s%s", code, out, errOut)
+	}
+	pin := digestFrom(t, out)
+
+	for _, form := range []string{pin, "sha256:" + strings.ToUpper(pin)} {
+		if code, out, errOut := h.run("scan", "--baseline-sha256", form); code != exitClean {
+			t.Fatalf("pin %q: exit %d\n%s%s", form, code, out, errOut)
+		}
+	}
+	h.env["SENTRY_BASELINE_SHA256"] = pin
+	if code, out, errOut := h.run("scan"); code != exitClean {
+		t.Fatalf("pin from the environment: exit %d\n%s%s", code, out, errOut)
+	}
+
+	// An attacker who can write the state directory edits the baseline and
+	// recomputes the seal. The seal passes; the pin, held elsewhere, does not.
+	h.tamper()
+	if code, _, _ := h.run("baseline", "--reseal"); code != exitClean {
+		t.Fatal("reseal failed")
+	}
+	code, out, errOut = h.run("scan")
+	if code != exitError || !strings.Contains(errOut, "pinned") || strings.Contains(out, "healthy") {
+		t.Errorf("resealed but pinned: exit %d\nstdout:%s\nstderr:%s", code, out, errOut)
+	}
+}
+
+func TestScanJSONCarriesTheBaselineDigest(t *testing.T) {
+	h := newHarness(t)
+	_, out, _ := h.run("baseline")
+	want := digestFrom(t, out)
+	_, out, _ = h.run("scan", "--json")
+	var rep struct {
+		Baseline struct {
+			SHA256 string `json:"sha256"`
+			Sealed bool   `json:"sealed"`
+		} `json:"baseline"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.Baseline.SHA256 != want || !rep.Baseline.Sealed {
+		t.Errorf("report baseline = %+v, want sha256 %s and sealed", rep.Baseline, want)
+	}
+}
+
+func TestBaselineWithoutSealStillWorksButSaysSo(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	data, err := os.ReadFile(h.baselineFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rewrite the file the way a sentry from before seals existed saved it.
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "sha256")
+	legacy, _ := json.MarshalIndent(raw, "", "  ")
+	if err := os.WriteFile(h.baselineFile(), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errOut := h.run("scan")
+	if code != exitClean || !strings.Contains(errOut, "no integrity seal") {
+		t.Errorf("legacy baseline: exit %d\nstdout:%s\nstderr:%s", code, out, errOut)
+	}
+}
+
 func TestIsolatePartialFailureThenRetryThenRelease(t *testing.T) {
 	h := newHarness(t)
 	h.api.add(intruder())

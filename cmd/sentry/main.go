@@ -254,6 +254,10 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	staleDays := fs.Int("stale-days", 30, "flag devices not seen for N days, 0 to disable (overrides the rules file)")
 	minVersion := fs.String("min-version", "", "flag Tailscale clients older than this version, e.g. 1.80.0")
 	failOnFlag := fs.String("fail-on", "medium", "lowest severity that exits 1 and sends the webhook: low, medium or high")
+	// The pin is only worth something if it lives where whoever can edit the
+	// state directory cannot reach: the scheduler's own configuration, say.
+	pin := fs.String("baseline-sha256", d.getenv("SENTRY_BASELINE_SHA256"),
+		"refuse to scan unless the baseline has this sha256, as printed by `sentry baseline --digest` (env SENTRY_BASELINE_SHA256)")
 	if pos, err := parse(fs, args); err != nil {
 		return exitError, err
 	} else if len(pos) > 0 {
@@ -297,6 +301,13 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	base, err := baseline.Load(c.baselinePath())
 	if err != nil {
 		return exitError, err
+	}
+	if *pin != "" {
+		if err := base.CheckPin(*pin); err != nil {
+			return exitError, err
+		}
+	} else if !base.Sealed() {
+		fmt.Fprintln(d.stderr, "sentry: note: this baseline has no integrity seal; `sentry baseline --reseal` adds one")
 	}
 	inv, err := collect(ctx, &c, d)
 	if err != nil {
@@ -344,6 +355,8 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	c.register(fs, d)
 	force := fs.Bool("force", false, "replace an existing baseline")
 	accept := fs.String("accept", "", "accept one device's current state into the existing baseline, leaving the rest unchanged")
+	digest := fs.Bool("digest", false, "print the sha256 of the existing baseline, for --baseline-sha256, and exit")
+	reseal := fs.Bool("reseal", false, "bless the existing baseline file as it is now, after a deliberate hand edit")
 	if pos, err := parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -351,6 +364,12 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	if err := c.check(); err != nil {
 		return err
+	}
+	if *digest || *reseal {
+		if *digest && *reseal {
+			return errors.New("--digest and --reseal are separate actions; pick one")
+		}
+		return baselineOffline(&c, *reseal, d)
 	}
 	inv, err := collect(ctx, &c, d)
 	if err != nil {
@@ -367,6 +386,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 		return report.Build(inv, &b, nil, version, d.now()).WriteJSON(d.stdout)
 	}
 	fmt.Fprintf(d.stdout, "Recorded %d devices from the %s source to %s\n", len(inv.Devices), inv.Source, c.baselinePath())
+	fmt.Fprintf(d.stdout, "Baseline sha256: %s\n", b.Digest())
 	fmt.Fprintln(d.stdout, "Every device, owner, tag and route below is now accepted. Check that you recognise each one:")
 	fmt.Fprintln(d.stdout)
 	for _, dev := range inv.Devices {
@@ -379,6 +399,32 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 		}
 		fmt.Fprintf(d.stdout, "  %-20s %-28s %-8s%s\n", report.Clean(dev.ShortName()), report.Clean(dev.Owner), report.Clean(dev.OS), report.Clean(extra))
 	}
+	return nil
+}
+
+// baselineOffline serves --digest and --reseal, which touch only the file on
+// disk. Both read it without checking the seal: --digest must work on a file
+// that fails the check (so the operator can see what it hashes to), and
+// --reseal exists to bless exactly such a file.
+func baselineOffline(c *common, reseal bool, d deps) error {
+	base, err := baseline.LoadUnverified(c.baselinePath())
+	if err != nil {
+		return err
+	}
+	if !reseal {
+		fmt.Fprintln(d.stdout, base.Digest())
+		return nil
+	}
+	stored := base.Seal
+	if err := baseline.Save(c.baselinePath(), base, true); err != nil {
+		return err
+	}
+	fmt.Fprintf(d.stdout, "Resealed %s (%d devices). Review it: sentry now trusts every record in it.\n", c.baselinePath(), len(base.Devices))
+	fmt.Fprintf(d.stdout, "Baseline sha256: %s", base.Digest())
+	if stored != "" && !strings.EqualFold(stored, base.Digest()) {
+		fmt.Fprintf(d.stdout, " (the stored seal did not match; it was %s)", stored)
+	}
+	fmt.Fprintln(d.stdout)
 	return nil
 }
 
@@ -408,6 +454,7 @@ func acceptDevice(c *common, inv inventory.Inventory, query string, d deps) erro
 	}
 	fmt.Fprintf(d.stdout, "%s %s (%s, owner %s, tags %s) in %s\n", verb, report.Clean(dev.ShortName()),
 		report.Clean(dev.ID), report.Clean(firstNonEmpty(dev.Owner, "unknown")), report.Clean(listOrNone(dev.Tags)), c.baselinePath())
+	fmt.Fprintf(d.stdout, "Baseline sha256: %s (update any pin you keep)\n", base.Digest())
 	return nil
 }
 

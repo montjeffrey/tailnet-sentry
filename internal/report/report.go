@@ -47,9 +47,15 @@ type Summary struct {
 }
 
 // BaselineInfo describes the baseline a scan was compared with.
+//
+// SHA256 travels with every report so that whatever collects them off-host
+// sees the baseline change if someone edits it: the sentry host cannot be
+// trusted to say so itself.
 type BaselineInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	Devices   int       `json:"devices"`
+	SHA256    string    `json:"sha256"`
+	Sealed    bool      `json:"sealed"`
 }
 
 // Report is the result of one scan.
@@ -76,7 +82,7 @@ func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Fi
 		r.Findings = []rules.Finding{}
 	}
 	if base != nil {
-		r.Baseline = &BaselineInfo{CreatedAt: base.CreatedAt, Devices: len(base.Devices)}
+		r.Baseline = &BaselineInfo{CreatedAt: base.CreatedAt, Devices: len(base.Devices), SHA256: base.Digest(), Sealed: base.Sealed()}
 	}
 	for _, d := range inv.Devices {
 		row := DeviceStatus{ID: d.ID, Name: d.ShortName(), Owner: d.Owner, OS: d.OS, Tags: d.Tags, Online: d.Online}
