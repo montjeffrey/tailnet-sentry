@@ -28,6 +28,9 @@ type Config struct {
 	// It defaults to MinSafeVersion; an explicit "" disables the check
 	// (update-available still applies).
 	MinClientVersion string `json:"minClientVersion"`
+	// AuthKeyMaxDays flags a new auth key valid for longer than this many
+	// days. 0 disables the lifetime check; reusable keys are flagged anyway.
+	AuthKeyMaxDays int `json:"authKeyMaxDays"`
 	// Disabled lists rule IDs to skip entirely.
 	Disabled []string `json:"disabled,omitempty"`
 }
@@ -39,7 +42,7 @@ const MinSafeVersion = "1.104.2"
 
 // DefaultConfig is used when no config file is given.
 func DefaultConfig() Config {
-	return Config{ExpiryWarnDays: 14, StaleDays: 30, MinClientVersion: MinSafeVersion}
+	return Config{ExpiryWarnDays: 14, StaleDays: 30, MinClientVersion: MinSafeVersion, AuthKeyMaxDays: 7}
 }
 
 // LoadConfig reads a JSON config. Unknown fields are an error, so a typo
@@ -63,8 +66,8 @@ func LoadConfig(path string) (Config, error) {
 
 // Validate checks values that would otherwise make a rule silently useless.
 func (c Config) Validate() error {
-	if c.ExpiryWarnDays < 0 || c.StaleDays < 0 {
-		return fmt.Errorf("expiryWarnDays and staleDays must not be negative")
+	if c.ExpiryWarnDays < 0 || c.StaleDays < 0 || c.AuthKeyMaxDays < 0 {
+		return fmt.Errorf("expiryWarnDays, staleDays and authKeyMaxDays must not be negative")
 	}
 	if c.MinClientVersion != "" {
 		if _, ok := parseVersion(c.MinClientVersion); !ok {
@@ -78,6 +81,9 @@ func (c Config) Validate() error {
 	}
 	known := map[string]bool{}
 	for _, r := range All() {
+		known[r.ID] = true
+	}
+	for _, r := range AllControl() {
 		known[r.ID] = true
 	}
 	for _, id := range c.Disabled {

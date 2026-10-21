@@ -61,12 +61,20 @@ they are configured.
      the first release with the October 2026 security fixes, because everything it reports comes
      from that daemon. Use the API for production monitoring.
    - `--source auto` (the default) uses the API when credentials are set, else the local daemon.
+
+   With the API, sentry also reads the tailnet's **control plane**, the settings an admin login
+   can change without touching a device: the policy file, auth keys, DNS and users. Each is read
+   with its own narrow scope. A section the credential cannot read is reported as not checked
+   and its rules are skipped.
 2. **Baseline.** `sentry baseline` records the known-good state of each device to a local JSON
    file: id, name, owner, OS, tags, addresses, client version, key expiry, authorization,
-   advertised routes and exit-node status. The baseline is your statement of accepted risk, so it
-   refuses to overwrite an existing one without `--force`, and it lists everything it accepted.
-   `sentry baseline --accept <device>` accepts one device's current state without re-accepting
-   the rest of the tailnet.
+   advertised routes, exit-node status and Tailscale SSH. From the API it also records the policy
+   file's sha256, the IDs of existing keys, the nameservers and split DNS, and each user's role.
+   The baseline is your statement of accepted risk, so it refuses to overwrite an existing one
+   without `--force`, and it lists everything it accepted. `sentry baseline --accept <device>`
+   accepts one device's current state without re-accepting the rest of the tailnet.
+   `sentry baseline --accept-control policy` (or `keys`, `dns`, `users`, a comma list, or `all`)
+   does the same for a deliberate change to the tailnet's configuration.
 3. **Rules.** `sentry scan` runs each rule, a small pure function, over every device
    ([table below](#rules)). Devices with no findings are marked **healthy**.
 4. **Isolate.** `sentry isolate <device>` replaces the device's tags with `tag:quarantine`, and
@@ -136,13 +144,25 @@ or an error message. If both are set, the OAuth client wins.
 | --- | --- | --- |
 | `scan`, `baseline` with `--source local` | `tailscale status --json` | none |
 | `scan`, `baseline` with `--source api` | `GET /tailnet/{tailnet}/devices` | OAuth client with **`devices:core:read`** |
+| …and the control-plane rules, each optional | `GET /tailnet/{tailnet}/acl` | **`policy_file:read`** (`policy-changed`, `policy-permissive`) |
+| | `GET /tailnet/{tailnet}/keys` | **`auth_keys:read`** (`auth-key-risky`) |
+| | `GET /tailnet/{tailnet}/dns/nameservers`, `GET /tailnet/{tailnet}/dns/split-dns` | **`dns:read`** (`dns-changed`) |
+| | `GET /tailnet/{tailnet}/users` | **`users:read`** (`new-user`, `user-role-changed`) |
 | `isolate`, `release` (dry run) | `GET /tailnet/{tailnet}/devices` | OAuth client with **`devices:core:read`** |
 | `isolate --apply`, `release --apply` | `POST /device/{id}/tags`, `POST /device/{id}/authorized` | OAuth client with **`devices:core`** and tag **`tag:quarantine`** selected; select too any tags `release` must put back, since only a tag's owners may apply it |
 
+Each control-plane section is fetched with a token requested for that one scope. If the client was
+not granted the scope (or an API access token gets a 403), that section is **unknown**: `scan`
+prints a note on stderr naming the missing scope, lists the section under "Not checked", puts it in
+the report's `unread` field, and runs its rules on nothing. A missing scope never produces a
+finding and never fails the scan. Only `devices:core:read` is required.
+
 Recommended setup, in the admin console under **Settings → Trust credentials**:
 
-- A **read-only** OAuth client (`devices:core:read`). Use it for scheduled scans. If it leaks,
-  it can list devices and nothing else.
+- A **read-only** OAuth client (`devices:core:read`, `policy_file:read`, `auth_keys:read`,
+  `dns:read`, `users:read`). Use it for scheduled scans. If it leaks, it can read the device list
+  and the tailnet's configuration and change nothing. The key list carries key metadata, never
+  the key secrets.
 - A separate **write** client (`devices:core` with `tag:quarantine`), kept out of the scheduler
   and loaded into your shell only when you need to isolate.
 
@@ -230,10 +250,31 @@ used to hide a device that still has access.
 | `key-expiring` | medium | the key expires within `expiryWarnDays` (default 14) | api, local |
 | `client-outdated` | medium | the client is older than `minClientVersion` (default 1.104.2) | api (local: own device only) |
 | `client-changed` | medium | a known device's client went *down* a version, or is a different build of the same version (upgrades stay quiet) | api (local: own device only) |
+| `tailnet-lock-unsigned` | high | tailnet lock is on and Tailscale reports the device's node key is not validly signed (fires whatever the baseline says) | api |
+| `ssh-enabled` | medium | the device newly runs Tailscale SSH, so the policy's `ssh` rules can grant a shell on it (or a new device runs it) | api |
 | `stale` | low | offline and not seen for `staleDays` (default 30) | api, local |
 | `update-available` | low | Tailscale reports a client update | api |
 
 \* Locally, only routes a peer actually serves are visible, not ones awaiting approval.
+
+**Tailnet rules** look at the control plane, not at a device. Their findings are listed with
+`tailnet` in the device column, and `sentry isolate` cannot undo them. They need the API and the
+scope shown; see [Token scopes](#token-scopes).
+
+| Rule | Severity | Fires when | Scope |
+| --- | --- | --- | --- |
+| `policy-permissive` | high | an `acls` or `grants` entry has a `src` a quarantined device still matches: `*`, `autogroup:tagged`, `autogroup:danger-all`, `tag:quarantine`, or an address range (or `hosts` alias for one) spanning the whole Tailscale range. Fires on the current policy whatever the baseline says | `policy_file:read` |
+| `policy-changed` | high | the policy file's sha256 differs from the baseline's. The digest is over the canonical JSON form, so whitespace, comments and key order do not count | `policy_file:read` |
+| `auth-key-risky` | high | a live auth key not in the baseline is reusable, or is valid for longer than `authKeyMaxDays` (default 7). Revoked, expired and invalid keys, API tokens and OAuth clients are skipped | `auth_keys:read` |
+| `dns-changed` | high | the global nameservers, or any split-DNS domain's nameservers, differ from the baseline (added, removed or repointed) | `dns:read` |
+| `new-user` | high | a user ID is not in the baseline; the detail says when the new user is an admin or shared in | `users:read` |
+| `user-role-changed` | high | a known user now has `owner`, `admin`, `it-admin` or `network-admin` and did not before. Lowering a role stays quiet | `users:read` |
+
+A baseline from before these rules existed has no control-plane record. `scan` then names each
+missing section on stderr, and `sentry baseline --accept-control all` records the current state.
+Until you do, the drift rules for those sections stay quiet. `policy-permissive` still runs,
+because it needs no baseline. Such a baseline also has no Tailscale SSH state, so `ssh-enabled`
+stays quiet for its devices until they are re-accepted.
 
 Tune them with `--rules file.json` (unknown keys are an error, so typos fail loudly), or with flags
 `--expiry-days`, `--stale-days` and `--min-version`:
@@ -246,12 +287,17 @@ Tune them with `--rules file.json` (unknown keys are an error, so typos fail lou
   "expiryWarnDays": 14,
   "staleDays": 30,
   "minClientVersion": "1.104.2",
+  "authKeyMaxDays": 7,
   "disabled": ["update-available"]
 }
 ```
 
 Without a rules file, `minClientVersion` is 1.104.2, the first release with the October 2026
 security fixes, so a device on an older client is an anomaly. Set it to `""` to turn the check off.
+
+`authKeyMaxDays: 0` turns off the lifetime check; reusable keys are still flagged. To silence
+`policy-permissive` on a tailnet that deliberately keeps a `*` rule, add it to `disabled`, and
+know that `isolate` then changes a label and nothing else.
 
 `sentry rules` lists them all.
 
@@ -356,6 +402,16 @@ off the host sees a baseline change even if the host is lying.
   exit node (sees traffic routed through it).
 - **Hygiene that becomes risk.** Keys about to expire or already expired, key expiry newly disabled,
   outdated clients, and forgotten devices that still hold valid keys.
+- **A stolen admin login reshaping the tailnet.** Someone holding an admin session or API token can
+  do damage without enrolling a device. With the scopes granted, sentry sees each of these on the
+  next scan:
+  - a policy edit (`policy-changed`), and in particular a rule that undoes quarantine
+    (`policy-permissive`);
+  - a reusable or long-lived auth key minted to enrol a device later (`auth-key-risky`);
+  - nameservers or split DNS pointed at a resolver they run (`dns-changed`);
+  - a new user, or a member promoted to admin or owner (`new-user`, `user-role-changed`);
+  - Tailscale SSH turned on as a way between devices (`ssh-enabled`);
+  - a node added past tailnet lock, unsigned (`tailnet-lock-unsigned`).
 
 **What it cannot catch**
 
@@ -364,9 +420,19 @@ off the host sees a baseline change even if the host is lying.
   analyser. It never sees packets.
 - **Anything between scans.** It polls. An attacker has the interval between runs, and a device
   that joins and leaves inside it goes unseen.
-- **A compromised admin or write credential.** Whoever holds one can change the policy that makes
-  quarantine work, re-tag devices, or delete them. A read-only scanning credential limits what a
+- **Stopping a compromised admin or write credential.** Sentry reports what such an attacker
+  changed; it cannot prevent or undo it. They can change the policy that makes quarantine work,
+  re-tag devices, or delete them, and they have until the next scan. They can also remove scopes
+  from sentry's OAuth client. That blinds the control-plane rules, and by design a missing scope is
+  never a finding: it shows only as a stderr note ("the baseline records the … but this credential
+  can no longer read it"), the "Not checked" line, and `unread` in the JSON report. Have whatever
+  collects reports alert on a non-empty `unread`. A read-only scanning credential limits what a
   leak of *sentry's* credential can do, but not what a stolen admin account can.
+- **Control-plane changes it does not read.** It does not flag new API access tokens or OAuth
+  clients, webhooks, log streaming, device posture, MagicDNS or search-path changes, or tailnet
+  settings such as device approval. `policy-permissive` reads only `src` in `acls` and `grants`.
+  It does not expand groups, read `ssh` rules, or flag a `src` naming a single tailnet address;
+  `policy-changed` still catches any such edit made after the baseline.
 - **Tampering on the sentry host.** Someone who can write the state directory can edit the baseline
   to accept their device, and recompute its seal. Only a [pinned digest](#protecting-the-baseline)
   kept off that host, or the digest in off-host reports, exposes that. The audit log is hash-chained: `sentry audit verify` detects a changed,
@@ -380,13 +446,14 @@ off the host sees a baseline change even if the host is lying.
 - **The local source's blind spots.** It sees only peers this device's policy shows it, and no
   client versions, update status, pending routes, unauthorized devices or cloned keys of peers.
 - **Isolation without the policy.** Without the quarantine policy (and with a `*` rule present),
-  `isolate` changes a label and nothing else.
+  `isolate` changes a label and nothing else. With `policy_file:read`, `policy-permissive` reports
+  such a rule on every scan.
 
 ## Files
 
 | Path (under `--state-dir`) | What |
 | --- | --- |
-| `baseline.json` | accepted inventory: device metadata only, mode 0600, written atomically, sealed with its own `sha256`; refused if over 64 MiB |
+| `baseline.json` | accepted inventory: device metadata, and from the API the policy digest, key IDs, DNS servers and user roles (never a key or credential), mode 0600, written atomically, sealed with its own `sha256`; refused if over 64 MiB |
 | `audit.jsonl` | one JSON line per isolate or release (dry runs too), opened append-only and hash-chained (tamper-evident except at the tail); check it with `sentry audit verify` |
 | `audit.jsonl.lock` | empty; held while an entry is appended, so sentry runs at the same moment take turns instead of forking the chain |
 
@@ -406,7 +473,8 @@ Every test runs against recorded fixtures (`internal/*/testdata`) and `httptest`
 calls the real API or needs a tailnet. The anomaly rules are table-tested one by one in
 `internal/rules/rules_test.go`. The end-to-end tests in `cmd/sentry/main_test.go` drive the real
 commands and also assert that a credential never reaches output, errors, the baseline or the audit
-log.
+log. `cmd/sentry/attack_scenarios_test.go` plays each takeover in the threat model against a
+baselined fake tailnet and checks that the scan exits 1 with the expected rule.
 
 CI (`.github/workflows`) runs with a read-only token and actions pinned to full commit SHAs. It
 runs `go vet`, `go test -race` on Linux, macOS and Windows, govulncheck, and gitleaks over the full

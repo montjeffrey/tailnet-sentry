@@ -62,6 +62,13 @@ type Device struct {
 	// MultipleConnections means several machines are connected with this
 	// device's node key at once: usually its state was copied elsewhere.
 	MultipleConnections bool `json:"multipleConnections,omitempty"`
+
+	// SSHEnabled means the device runs Tailscale SSH, so the policy's ssh
+	// rules (not just its network rules) decide who may log in to it.
+	SSHEnabled bool `json:"sshEnabled,omitempty"`
+	// TailnetLockError is set when tailnet lock is on and the device's node
+	// key is not validly signed by a trusted lock key.
+	TailnetLockError string `json:"tailnetLockError,omitempty"`
 }
 
 // Inventory is every device one source could see at one moment.
@@ -69,6 +76,77 @@ type Inventory struct {
 	Source  Source    `json:"source"`
 	Taken   time.Time `json:"taken"`
 	Devices []Device  `json:"devices"`
+	// Control is the tailnet-wide configuration. Only the API source reads
+	// it; it is nil for the local source.
+	Control *Control `json:"control,omitempty"`
+}
+
+// Control is the tailnet's control-plane configuration: the things an admin
+// login can change without touching any device. Each section is nil when the
+// credential could not read it (it lacks the scope), and every rule treats a
+// nil section as unknown, never as bad.
+type Control struct {
+	Policy   *Policy    `json:"policy,omitempty"`
+	AuthKeys *[]AuthKey `json:"authKeys,omitempty"`
+	DNS      *DNS       `json:"dns,omitempty"`
+	Users    *[]User    `json:"users,omitempty"`
+}
+
+// Policy is the tailnet policy file, reduced to what the rules check.
+type Policy struct {
+	// SHA256 is the hex digest of the policy in canonical JSON form, so a
+	// whitespace, comment or key-order edit does not count as a change.
+	SHA256 string       `json:"sha256"`
+	Rules  []PolicyRule `json:"rules,omitempty"`
+	// Hosts are the policy's named addresses, which a rule may use as src.
+	Hosts map[string]string `json:"hosts,omitempty"`
+}
+
+// PolicyRule is one entry of the policy's "acls" or "grants" list.
+type PolicyRule struct {
+	Section string   `json:"section"` // "acls" or "grants"
+	Index   int      `json:"index"`
+	Src     []string `json:"src"`
+	Dst     []string `json:"dst"`
+}
+
+// Name is how a rule is quoted in findings, e.g. "grants[2]".
+func (r PolicyRule) Name() string { return fmt.Sprintf("%s[%d]", r.Section, r.Index) }
+
+// AuthKey is one key from the tailnet's key list. KeyType distinguishes
+// auth keys (which enrol devices) from API tokens and OAuth clients.
+type AuthKey struct {
+	ID            string    `json:"id"`
+	KeyType       string    `json:"keyType,omitempty"` // "auth", "api", "client"; empty from older API versions
+	Description   string    `json:"description,omitempty"`
+	Created       time.Time `json:"created,omitzero"`
+	Expires       time.Time `json:"expires,omitzero"`
+	Revoked       bool      `json:"revoked,omitempty"`
+	Invalid       bool      `json:"invalid,omitempty"`
+	Reusable      bool      `json:"reusable,omitempty"`
+	Ephemeral     bool      `json:"ephemeral,omitempty"`
+	Preauthorized bool      `json:"preauthorized,omitempty"`
+	Tags          []string  `json:"tags,omitempty"`
+}
+
+// EnrolsDevices reports whether the key is an auth key, the kind a new
+// device can join the tailnet with.
+func (k AuthKey) EnrolsDevices() bool { return k.KeyType == "auth" || k.KeyType == "" }
+
+// DNS is the tailnet's DNS configuration as pushed to every device.
+type DNS struct {
+	Nameservers []string `json:"nameservers"`
+	// SplitDNS maps a domain to the nameservers that answer for it.
+	SplitDNS map[string][]string `json:"splitDns,omitempty"`
+}
+
+// User is one login in the tailnet.
+type User struct {
+	ID        string `json:"id"`
+	LoginName string `json:"loginName"`
+	Role      string `json:"role"`           // "owner", "admin", "member", ...
+	Type      string `json:"type,omitempty"` // "member" or "shared"
+	Status    string `json:"status,omitempty"`
 }
 
 // Sort orders devices by short name, then ID, so output is stable.

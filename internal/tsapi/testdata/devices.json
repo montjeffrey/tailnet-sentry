@@ -67,6 +67,9 @@
       "isExternal": false,
       "enabledRoutes": ["192.168.1.0/24"],
       "advertisedRoutes": ["192.168.1.0/24"],
+      "sshEnabled": true,
+      "tailnetLockKey": "tlpub:0000",
+      "tailnetLockError": "",
       "tags": ["tag:server"]
     },
     {
@@ -85,6 +88,7 @@
       "authorized": true,
       "isExternal": true,
       "multipleConnections": true,
+      "tailnetLockError": "node is not signed",
       "tags": []
     }
   ]

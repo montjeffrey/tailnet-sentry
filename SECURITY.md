@@ -46,16 +46,21 @@ redirects are refused.
   the current user could replace (the file, its directories, or a symlink
   target's directories) is refused; on Windows only the install location
   is trusted.
-- OAuth clients are exchanged for a token scoped to the command:
-  `devices:core:read` for scan and baseline, and `devices:core` only for
-  `isolate --apply` and `release --apply`. The token lives in memory only.
+- OAuth clients are exchanged for a token scoped to the call:
+  `devices:core:read` for the device list, one token each for
+  `policy_file:read`, `auth_keys:read`, `dns:read` and `users:read` when scan
+  and baseline read the control plane, and `devices:core` only for
+  `isolate --apply` and `release --apply`. Tokens live in memory only. A scope
+  the client lacks makes that section unknown, never an error or a finding.
+- The key list is read for key metadata (ID, type, dates, capabilities). The
+  API does not return key secrets there, and sentry records only key IDs.
 - HTTP redirects from the API are refused rather than followed.
 
 ## Files written
 
 | File | Content | Permissions |
 | --- | --- | --- |
-| `<state-dir>/baseline.json` | device metadata accepted as known-good | 0600, written atomically, at most 64 MiB on load |
+| `<state-dir>/baseline.json` | device metadata, policy digest, key IDs, DNS servers and user roles accepted as known-good | 0600, written atomically, at most 64 MiB on load |
 | `<state-dir>/audit.jsonl` | every isolate and release, dry runs included | 0600, opened O_APPEND, hash-chained |
 | `<state-dir>/audit.jsonl.lock` | empty; an OS lock on it serialises appends | 0600 |
 

@@ -5,5 +5,6 @@
   "expiryWarnDays": 14,
   "staleDays": 30,
   "minClientVersion": "1.104.2",
+  "authKeyMaxDays": 7,
   "disabled": []
 }

@@ -390,3 +390,257 @@ func TestParseVersion(t *testing.T) {
 		}
 	}
 }
+
+func boolp(b bool) *bool { return &b }
+
+func TestSSHEnabled(t *testing.T) {
+	off := laptopRecord()
+	off.SSHEnabled = boolp(false)
+	on := laptopRecord()
+	on.SSHEnabled = boolp(true)
+	ssh := func(d *inventory.Device) { d.SSHEnabled = true }
+	runCases(t, SSHEnabled, []ruleCase{
+		{name: "off", known: off},
+		{name: "newly on", dev: ssh, known: off, want: "Tailscale SSH is enabled"},
+		{name: "on in the baseline", dev: ssh, known: on},
+		{name: "baseline predates the field: unknown", dev: ssh, known: laptopRecord()},
+		{name: "new device with ssh", dev: ssh, want: "Tailscale SSH"},
+	})
+}
+
+func TestTailnetLockUnsigned(t *testing.T) {
+	runCases(t, TailnetLockUnsigned, []ruleCase{
+		{name: "signed", known: laptopRecord()},
+		{name: "unsigned", known: laptopRecord(), dev: func(d *inventory.Device) { d.TailnetLockError = "not signed" },
+			want: "tailnet lock: not signed"},
+	})
+}
+
+// controlCase runs one control rule against a current state and a baseline;
+// want is a substring every detail must contain, and n the detail count.
+type controlCase struct {
+	name string
+	cur  *inventory.Control
+	base *baseline.Baseline
+	want string
+	n    int
+}
+
+func runControl(t *testing.T, check func(Env, *inventory.Control, *baseline.Baseline) []string, cases []controlCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := check(env(), tc.cur, tc.base)
+			if tc.want == "" && tc.n == 0 {
+				if len(got) != 0 {
+					t.Errorf("fired unexpectedly: %q", got)
+				}
+				return
+			}
+			n := tc.n
+			if n == 0 {
+				n = 1
+			}
+			if len(got) != n {
+				t.Fatalf("got %d details %q, want %d", len(got), got, n)
+			}
+			for _, g := range got {
+				if !strings.Contains(g, tc.want) {
+					t.Errorf("detail %q lacks %q", g, tc.want)
+				}
+			}
+		})
+	}
+}
+
+func baseWith(c *baseline.Control) *baseline.Baseline {
+	return &baseline.Baseline{CreatedAt: now.Add(-days(1)), Control: c}
+}
+
+func TestPolicyChanged(t *testing.T) {
+	cur := &inventory.Control{Policy: &inventory.Policy{SHA256: "bbbbbbbbbbbbbbbb"}}
+	runControl(t, PolicyChanged, []controlCase{
+		{name: "same", cur: cur, base: baseWith(&baseline.Control{Policy: &baseline.PolicyRecord{SHA256: "BBBBBBBBBBBBBBBB"}})},
+		{name: "changed", cur: cur, base: baseWith(&baseline.Control{Policy: &baseline.PolicyRecord{SHA256: "aaaaaaaaaaaaaaaa"}}),
+			want: "sha256 bbbbbbbbbbbb, was aaaaaaaaaaaa"},
+		{name: "unreadable now", cur: &inventory.Control{}, base: baseWith(&baseline.Control{Policy: &baseline.PolicyRecord{SHA256: "a"}})},
+		{name: "baseline never recorded it", cur: cur, base: baseWith(nil)},
+		{name: "local source", cur: nil, base: baseWith(nil)},
+	})
+}
+
+func TestPolicyPermissive(t *testing.T) {
+	pol := func(hosts map[string]string, src ...string) *inventory.Control {
+		return &inventory.Control{Policy: &inventory.Policy{Hosts: hosts,
+			Rules: []inventory.PolicyRule{{Section: "grants", Index: 3, Src: src, Dst: []string{"tag:server"}}}}}
+	}
+	runControl(t, PolicyPermissive, []controlCase{
+		{name: "members only", cur: pol(nil, "autogroup:member", "group:admins", "alice@github")},
+		{name: "allow all", cur: pol(nil, "*"), want: `grants[3] has src "*" (to tag:server)`},
+		{name: "autogroup:tagged", cur: pol(nil, "autogroup:member", "autogroup:tagged"), want: `src "autogroup:tagged"`},
+		{name: "danger-all", cur: pol(nil, "autogroup:danger-all"), want: "danger-all"},
+		{name: "tag:quarantine itself", cur: pol(nil, "tag:quarantine"), want: "tag:quarantine"},
+		{name: "whole CGNAT range", cur: pol(nil, "100.64.0.0/10"), want: "100.64.0.0/10"},
+		{name: "wider than the range", cur: pol(nil, "0.0.0.0/0"), want: "0.0.0.0/0"},
+		{name: "whole v6 range", cur: pol(nil, "fd7a:115c:a1e0::/48"), want: "fd7a"},
+		{name: "one host address", cur: pol(nil, "100.64.0.5/32")},
+		{name: "part of the range", cur: pol(nil, "100.64.0.0/16")},
+		{name: "a hosts alias for the range", cur: pol(map[string]string{"everything": "100.64.0.0/10"}, "everything"), want: `"everything"`},
+		{name: "a hosts alias for a LAN", cur: pol(map[string]string{"lan": "192.168.1.0/24"}, "lan")},
+		{name: "case does not hide it", cur: pol(nil, "AutoGroup:Tagged"), want: "AutoGroup:Tagged"},
+		{name: "unreadable", cur: &inventory.Control{}},
+		{name: "two bad rules, two details", n: 2, want: "quarantined device", cur: &inventory.Control{Policy: &inventory.Policy{
+			Rules: []inventory.PolicyRule{{Section: "acls", Src: []string{"*"}}, {Section: "grants", Src: []string{"autogroup:tagged"}}}}}},
+	})
+}
+
+func TestAuthKeyRisky(t *testing.T) {
+	key := func(id string, reusable bool, life time.Duration, mut ...func(*inventory.AuthKey)) inventory.AuthKey {
+		k := inventory.AuthKey{ID: id, KeyType: "auth", Created: now.Add(-time.Hour), Reusable: reusable}
+		k.Expires = k.Created.Add(life)
+		for _, m := range mut {
+			m(&k)
+		}
+		return k
+	}
+	keys := func(ks ...inventory.AuthKey) *inventory.Control { return &inventory.Control{AuthKeys: &ks} }
+	accepted := baseWith(&baseline.Control{AuthKeys: &[]string{"kOLD"}})
+	runControl(t, AuthKeyRisky, []controlCase{
+		{name: "accepted reusable key", cur: keys(key("kOLD", true, days(90))), base: accepted},
+		{name: "new single-use, one day", cur: keys(key("kNEW", false, days(1))), base: accepted},
+		{name: "new reusable", cur: keys(key("kNEW", true, days(1))), base: accepted, want: "auth key kNEW created 2026-10-12: reusable"},
+		{name: "new long-lived", cur: keys(key("kNEW", false, days(90))), base: accepted, want: "valid for 90 days"},
+		{name: "preauthorized and tagged named", base: accepted, want: `kNEW ("ci"`, cur: keys(key("kNEW", true, days(1), func(k *inventory.AuthKey) {
+			k.Preauthorized, k.Tags, k.Description = true, []string{"tag:ci"}, "ci"
+		}))},
+		{name: "revoked", cur: keys(key("kNEW", true, days(90), func(k *inventory.AuthKey) { k.Revoked = true })), base: accepted},
+		{name: "invalid", cur: keys(key("kNEW", true, days(90), func(k *inventory.AuthKey) { k.Invalid = true })), base: accepted},
+		{name: "expired", cur: keys(key("kNEW", true, time.Minute)), base: accepted},
+		{name: "an API token, not an auth key", cur: keys(key("kAPI", true, days(90), func(k *inventory.AuthKey) { k.KeyType = "api" })), base: accepted},
+		{name: "no key list in baseline: older key accepted",
+			cur: keys(key("kNEW", true, days(90), func(k *inventory.AuthKey) { k.Created = now.Add(-days(5)) })), base: baseWith(nil)},
+		{name: "no key list in baseline: newer key flagged", cur: keys(key("kNEW", true, days(90))), base: baseWith(nil), want: "reusable"},
+		{name: "no key list, no creation time: unknown",
+			cur: keys(key("kNEW", true, days(90), func(k *inventory.AuthKey) { k.Created = time.Time{} })), base: baseWith(nil)},
+		{name: "unreadable", cur: &inventory.Control{}, base: accepted},
+	})
+	// authKeyMaxDays 0 turns the lifetime check off; reusable still fires.
+	e := env(func(c *Config) { c.AuthKeyMaxDays = 0 })
+	if got := AuthKeyRisky(e, keys(key("kNEW", false, days(90))), accepted); len(got) != 0 {
+		t.Errorf("lifetime check not disabled: %q", got)
+	}
+}
+
+func TestDNSChanged(t *testing.T) {
+	base := baseWith(&baseline.Control{DNS: &baseline.DNSRecord{Nameservers: []string{"1.1.1.1", "8.8.8.8"},
+		SplitDNS: map[string][]string{"corp.example": {"10.0.0.53"}}}})
+	dns := func(ns []string, split map[string][]string) *inventory.Control {
+		return &inventory.Control{DNS: &inventory.DNS{Nameservers: ns, SplitDNS: split}}
+	}
+	corp := map[string][]string{"corp.example": {"10.0.0.53"}}
+	runControl(t, DNSChanged, []controlCase{
+		{name: "same, reordered", cur: dns([]string{"8.8.8.8", "1.1.1.1"}, corp), base: base},
+		{name: "nameserver swapped", cur: dns([]string{"1.1.1.1", "203.0.113.53"}, corp), base: base,
+			want: "global nameservers changed from 1.1.1.1,8.8.8.8 to 1.1.1.1,203.0.113.53"},
+		{name: "nameservers removed", cur: dns(nil, corp), base: base, want: "to none"},
+		{name: "split DNS added", base: base, want: "split DNS added: github.com now resolves through 203.0.113.53",
+			cur: dns([]string{"1.1.1.1", "8.8.8.8"}, map[string][]string{"corp.example": {"10.0.0.53"}, "github.com": {"203.0.113.53"}})},
+		{name: "split DNS repointed", base: base, want: "split DNS for corp.example changed from 10.0.0.53 to 203.0.113.53",
+			cur: dns([]string{"1.1.1.1", "8.8.8.8"}, map[string][]string{"corp.example": {"203.0.113.53"}})},
+		{name: "split DNS removed", base: base, want: "split DNS removed for corp.example", cur: dns([]string{"1.1.1.1", "8.8.8.8"}, nil)},
+		{name: "both", base: base, n: 2, want: "", cur: dns([]string{"9.9.9.9"}, nil)},
+		{name: "baseline never recorded it", cur: dns([]string{"9.9.9.9"}, nil), base: baseWith(nil)},
+		{name: "unreadable", cur: &inventory.Control{}, base: base},
+	})
+}
+
+func TestUsers(t *testing.T) {
+	base := baseWith(&baseline.Control{Users: &[]baseline.UserRecord{
+		{ID: "u1", LoginName: "alice@github", Role: "owner"},
+		{ID: "u2", LoginName: "bob@github", Role: "member"},
+		{ID: "u3", LoginName: "carol@github", Role: "admin"},
+	}})
+	users := func(us ...inventory.User) *inventory.Control { return &inventory.Control{Users: &us} }
+	alice := inventory.User{ID: "u1", LoginName: "alice@github", Role: "owner"}
+	bob := inventory.User{ID: "u2", LoginName: "bob@github", Role: "member"}
+	carol := inventory.User{ID: "u3", LoginName: "carol@github", Role: "admin"}
+	t.Run("new-user", func(t *testing.T) {
+		runControl(t, NewUser, []controlCase{
+			{name: "same users", cur: users(alice, bob, carol), base: base},
+			{name: "a user left", cur: users(alice), base: base},
+			{name: "new member", cur: users(alice, inventory.User{ID: "u9", LoginName: "dan@github", Role: "member"}), base: base,
+				want: "new user dan@github, role member"},
+			{name: "new admin", cur: users(alice, inventory.User{ID: "u9", LoginName: "mallory@example.com", Role: "admin"}), base: base,
+				want: "can change the tailnet's configuration"},
+			{name: "shared in", cur: users(inventory.User{ID: "u9", LoginName: "eve@other", Role: "member", Type: "shared"}), base: base,
+				want: "shared in from outside"},
+			{name: "baseline never recorded users", cur: users(inventory.User{ID: "u9"}), base: baseWith(nil)},
+			{name: "unreadable", cur: &inventory.Control{}, base: base},
+		})
+	})
+	promoted := bob
+	promoted.Role = "admin"
+	owner := carol
+	owner.Role = "owner"
+	billing := bob
+	billing.Role = "billing-admin"
+	demoted := carol
+	demoted.Role = "member"
+	netAdmin := bob
+	netAdmin.Role = "network-admin"
+	t.Run("user-role-changed", func(t *testing.T) {
+		runControl(t, UserRoleChanged, []controlCase{
+			{name: "unchanged", cur: users(alice, bob, carol), base: base},
+			{name: "member to admin", cur: users(promoted), base: base, want: "user bob@github changed from member to admin"},
+			{name: "admin to owner", cur: users(owner), base: base, want: "from admin to owner"},
+			{name: "member to network-admin", cur: users(netAdmin), base: base, want: "network-admin"},
+			{name: "member to billing-admin is not privileged", cur: users(billing), base: base},
+			{name: "demotion stays quiet", cur: users(demoted), base: base},
+			{name: "new users are new-user's business", cur: users(inventory.User{ID: "u9", Role: "admin"}), base: base},
+		})
+	})
+}
+
+func TestEvaluateRunsControlRules(t *testing.T) {
+	current := laptop()
+	current.ClientVersion = MinSafeVersion // only the control-plane rules should fire
+	inv := inventory.Inventory{Devices: []inventory.Device{current}, Control: &inventory.Control{
+		Policy: &inventory.Policy{SHA256: "new", Rules: []inventory.PolicyRule{{Section: "acls", Src: []string{"*"}}}}}}
+	base := baseline.Baseline{Devices: []baseline.Record{*laptopRecord()}, Control: &baseline.Control{Policy: &baseline.PolicyRecord{SHA256: "old"}}}
+	got := Evaluate(inv, &base, DefaultConfig(), now)
+	if len(got) != 2 {
+		t.Fatalf("want policy-permissive and policy-changed, got %+v", got)
+	}
+	for _, f := range got {
+		if f.DeviceID != "" || f.Device != TailnetDevice || f.Severity != High {
+			t.Errorf("control finding %+v", f)
+		}
+	}
+	// Tailnet findings sort ahead of device findings of the same severity.
+	all := append([]Finding{{Rule: "new-device", Severity: High, DeviceID: "nA", Device: "a"}}, got...)
+	Sort(all)
+	if all[0].DeviceID != "" || all[2].DeviceID != "nA" {
+		t.Errorf("sort order: %+v", all)
+	}
+	cfg := DefaultConfig()
+	cfg.Disabled = []string{"policy-changed", "policy-permissive"}
+	if got := Evaluate(inv, &base, cfg, now); len(got) != 0 {
+		t.Errorf("disabled control rules fired: %+v", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("control rule IDs must be valid in disabled: %v", err)
+	}
+}
+
+func TestControlRuleIDsUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for _, r := range All() {
+		seen[r.ID] = true
+	}
+	for _, r := range AllControl() {
+		if seen[r.ID] || r.Check == nil || r.Summary == "" {
+			t.Errorf("bad control rule %+v", r.ID)
+		}
+		seen[r.ID] = true
+	}
+}

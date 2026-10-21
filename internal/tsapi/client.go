@@ -1,6 +1,7 @@
 // Package tsapi is a minimal client for the parts of the Tailscale API that
 // tailnet-sentry needs: listing devices, setting a device's tags and
-// (de)authorizing a device.
+// (de)authorizing a device, and reading the tailnet's policy file, keys, DNS
+// and users (control.go).
 //
 // It is written against net/http rather than Tailscale's Go client so the
 // binary has no third-party dependencies to audit, and so every request it
@@ -40,6 +41,14 @@ const (
 	// ScopeWrite also sets tags and authorization. Only isolate and release
 	// ask for it.
 	ScopeWrite Scope = "devices:core"
+
+	// The control-plane reads each have their own scope, and each is asked
+	// for with a client of its own, so a credential granted only some of them
+	// still reads those and reports the rest as unknown.
+	ScopePolicyRead Scope = "policy_file:read"
+	ScopeKeysRead   Scope = "auth_keys:read"
+	ScopeDNSRead    Scope = "dns:read"
+	ScopeUsersRead  Scope = "users:read"
 )
 
 const (
@@ -124,8 +133,8 @@ func (t *apiTime) UnmarshalJSON(b []byte) error {
 }
 
 // apiDevice mirrors the Device schema. Only fields sentry uses are decoded;
-// advertisedRoutes, enabledRoutes and multipleConnections are present only
-// with ?fields=all.
+// advertisedRoutes, enabledRoutes, multipleConnections, sshEnabled and
+// tailnetLockError are present only with ?fields=all.
 type apiDevice struct {
 	ID                  string   `json:"id"`
 	NodeID              string   `json:"nodeId"`
@@ -146,6 +155,8 @@ type apiDevice struct {
 	Tags                []string `json:"tags"`
 	AdvertisedRoutes    []string `json:"advertisedRoutes"`
 	EnabledRoutes       []string `json:"enabledRoutes"`
+	SSHEnabled          bool     `json:"sshEnabled"`
+	TailnetLockError    string   `json:"tailnetLockError"`
 }
 
 func (d apiDevice) toDevice() inventory.Device {
@@ -172,6 +183,8 @@ func (d apiDevice) toDevice() inventory.Device {
 		Online:              d.ConnectedToControl,
 		LastSeen:            d.LastSeen.Time,
 		MultipleConnections: d.MultipleConnections,
+		SSHEnabled:          d.SSHEnabled,
+		TailnetLockError:    d.TailnetLockError,
 	}
 }
 
@@ -290,7 +303,12 @@ func (c *Client) accessToken(ctx context.Context) (Secret, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return Secret{}, c.statusError(http.MethodPost, "/oauth/token", resp, Secret{})
+		err := c.statusError(http.MethodPost, "/oauth/token", resp, Secret{})
+		var se *StatusError
+		if errors.As(err, &se) {
+			se.Scope = c.scope
+		}
+		return Secret{}, err
 	}
 	var tok struct {
 		AccessToken string `json:"access_token"`
@@ -344,7 +362,37 @@ func (c *Client) statusError(method, path string, resp *http.Response, token Sec
 	if msg != "" {
 		msg = ": " + msg
 	}
-	return fmt.Errorf("tailscale API: %s %s: %s%s%s", method, trimQuery(path), resp.Status, msg, hint)
+	return &StatusError{Code: resp.StatusCode, Token: path == "/oauth/token",
+		text: fmt.Sprintf("tailscale API: %s %s: %s%s%s", method, trimQuery(path), resp.Status, msg, hint)}
+}
+
+// StatusError is a non-2xx response from the API. Its text is already
+// redacted.
+type StatusError struct {
+	Code int
+	// Token is set when the failure was the OAuth token exchange, and Scope
+	// then names the scope that was asked for.
+	Token bool
+	Scope Scope
+	text  string
+}
+
+func (e *StatusError) Error() string { return e.text }
+
+// ScopeDenied reports whether err means the credential may not make this
+// call: the API answered 403, or refused to issue an OAuth token for the
+// scope. Callers use it, after another call with the same credential has
+// already succeeded, to treat a section as unreadable rather than as a
+// failed scan.
+func ScopeDenied(err error) bool {
+	var e *StatusError
+	if !errors.As(err, &e) {
+		return false
+	}
+	if e.Token {
+		return e.Code == http.StatusBadRequest || e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden
+	}
+	return e.Code == http.StatusForbidden
 }
 
 // wrap redacts transport errors, whose text includes the request URL.

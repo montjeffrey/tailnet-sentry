@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -211,8 +212,10 @@ func parse(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-// collect reads the inventory from the chosen source.
-func collect(ctx context.Context, c *common, d deps) (inventory.Inventory, error) {
+// collect reads the inventory from the chosen source. With withControl, an
+// API inventory also carries the tailnet's control-plane configuration, and
+// unread names the sections the credential could not read.
+func collect(ctx context.Context, c *common, d deps, withControl bool) (inv inventory.Inventory, unread []string, err error) {
 	src := c.source
 	if src == "auto" {
 		src = string(inventory.SourceLocal)
@@ -224,25 +227,112 @@ func collect(ctx context.Context, c *common, d deps) (inventory.Inventory, error
 	case inventory.SourceAPI:
 		client, err := apiClient(c, d, tsapi.ScopeRead)
 		if err != nil {
-			return inventory.Inventory{}, err
+			return inventory.Inventory{}, nil, err
 		}
-		return client.ListDevices(ctx)
+		if inv, err = client.ListDevices(ctx); err != nil || !withControl {
+			return inv, nil, err
+		}
+		inv.Control, unread, err = collectControl(ctx, c, d)
+		return inv, unread, err
 	case inventory.SourceLocal:
-		inv, self, err := d.local(ctx)
+		var self tsutil.Self
+		inv, self, err = d.local(ctx)
 		if err != nil {
-			return inventory.Inventory{}, err
+			return inventory.Inventory{}, nil, err
 		}
 		// Everything the local source reports comes from this tailscaled. One
 		// older than the security floor is exposed to the issues that floor
 		// fixes, so its view of the tailnet is not evidence of anything.
 		if older, ok := rules.OlderThan(self.Version, rules.MinSafeVersion); older || !ok {
-			return inventory.Inventory{}, fmt.Errorf("the local tailscaled is version %q, which is older than %s or unreadable, "+
+			return inventory.Inventory{}, nil, fmt.Errorf("the local tailscaled is version %q, which is older than %s or unreadable, "+
 				"so its view of the tailnet cannot be trusted. Update Tailscale on this machine, or scan with --source api",
 				self.Version, rules.MinSafeVersion)
 		}
-		return inv, nil
+		return inv, nil, nil
 	}
-	return inventory.Inventory{}, fmt.Errorf("--source must be api, local or auto, not %q", c.source)
+	return inventory.Inventory{}, nil, fmt.Errorf("--source must be api, local or auto, not %q", c.source)
+}
+
+// controlSection is one part of the control plane and how to read it.
+type controlSection struct {
+	name  string // as --accept-control spells it
+	what  string // for messages
+	scope tsapi.Scope
+	rules string // the drift rules that compare it with the baseline
+	read  func(context.Context, *tsapi.Client, *inventory.Control) error
+}
+
+var controlSections = []controlSection{
+	{baseline.SectionPolicy, "policy file", tsapi.ScopePolicyRead, "policy-changed",
+		func(ctx context.Context, cl *tsapi.Client, c *inventory.Control) (err error) {
+			c.Policy, err = cl.Policy(ctx)
+			return
+		}},
+	{baseline.SectionAuthKeys, "auth keys", tsapi.ScopeKeysRead, "auth-key-risky",
+		func(ctx context.Context, cl *tsapi.Client, c *inventory.Control) (err error) {
+			c.AuthKeys, err = cl.AuthKeys(ctx)
+			return
+		}},
+	{baseline.SectionDNS, "DNS settings", tsapi.ScopeDNSRead, "dns-changed",
+		func(ctx context.Context, cl *tsapi.Client, c *inventory.Control) (err error) {
+			c.DNS, err = cl.DNS(ctx)
+			return
+		}},
+	{baseline.SectionUsers, "user list", tsapi.ScopeUsersRead, "new-user and user-role-changed",
+		func(ctx context.Context, cl *tsapi.Client, c *inventory.Control) (err error) {
+			c.Users, err = cl.Users(ctx)
+			return
+		}},
+}
+
+// collectControl reads each control-plane section with a client of its own,
+// asking for that section's scope alone. The device list has already been
+// read with the same credential, so a refusal here means the credential
+// lacks the scope: the section is left unknown, a note goes to stderr, and
+// the scan carries on. Any other failure is an error, as it is for devices.
+func collectControl(ctx context.Context, c *common, d deps) (*inventory.Control, []string, error) {
+	ctl := &inventory.Control{}
+	var unread []string
+	for _, s := range controlSections {
+		client, err := apiClient(c, d, s.scope)
+		if err != nil {
+			return nil, nil, err
+		}
+		err = s.read(ctx, client, ctl)
+		if tsapi.ScopeDenied(err) {
+			skipped := s.rules
+			if s.name == baseline.SectionPolicy {
+				skipped += " and policy-permissive"
+			}
+			fmt.Fprintf(d.stderr, "sentry: note: cannot read the %s (the credential needs %s); %s skipped\n", s.what, s.scope, skipped)
+			unread = append(unread, s.name)
+			continue
+		}
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return ctl, unread, nil
+}
+
+// noteControlGaps tells the operator which drift rules this baseline cannot
+// support: sections the scan read but the baseline never recorded, and
+// sections the baseline has that the credential can no longer read.
+func noteControlGaps(w io.Writer, inv inventory.Inventory, base *baseline.Baseline, unread []string) {
+	if inv.Control == nil {
+		return
+	}
+	for _, s := range controlSections {
+		has := base.Control.Has(s.name)
+		switch {
+		case slices.Contains(unread, s.name) && has:
+			fmt.Fprintf(w, "sentry: note: the baseline records the %s but this credential can no longer read it; "+
+				"if you did not narrow the credential, find out who did\n", s.what)
+		case !slices.Contains(unread, s.name) && !has:
+			fmt.Fprintf(w, "sentry: note: the baseline has no record of the %s, so %s cannot compare it; "+
+				"`sentry baseline --accept-control %s` records it\n", s.what, s.rules, s.name)
+		}
+	}
 }
 
 func apiClient(c *common, d deps, scope tsapi.Scope) (*tsapi.Client, error) {
@@ -321,7 +411,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	} else if !base.Sealed() {
 		fmt.Fprintln(d.stderr, "sentry: note: this baseline has no integrity seal; `sentry baseline --reseal` adds one")
 	}
-	inv, err := collect(ctx, &c, d)
+	inv, unread, err := collect(ctx, &c, d, true)
 	if err != nil {
 		return exitError, err
 	}
@@ -331,9 +421,12 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 			"Scan with --source %s, or re-record the baseline", base.Source, inv.Source, base.Source)
 	}
 
+	noteControlGaps(d.stderr, inv, &base, unread)
+
 	now := d.now()
 	findings := rules.Evaluate(inv, &base, cfg, now)
 	rep := report.Build(inv, &base, findings, version, now)
+	rep.Unread = unread
 	if c.json {
 		err = rep.WriteJSON(d.stdout)
 	} else {
@@ -370,6 +463,8 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	digest := fs.Bool("digest", false, "print the sha256 of the existing baseline, for --baseline-sha256, and exit")
 	reseal := fs.Bool("reseal", false, "bless the existing baseline file as it is now, after a deliberate hand edit")
 	allowPartial := fs.Bool("allow-partial", false, "allow recording a baseline from the local source, which can miss devices")
+	acceptControl := fs.String("accept-control", "", "accept the tailnet's current "+strings.Join(baseline.Sections, ", ")+
+		" (comma-separated, or all) into the existing baseline, leaving devices unchanged")
 	if pos, err := parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -384,7 +479,10 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 		}
 		return baselineOffline(&c, *reseal, d)
 	}
-	inv, err := collect(ctx, &c, d)
+	if *accept != "" && *acceptControl != "" {
+		return errors.New("--accept and --accept-control are separate actions; pick one")
+	}
+	inv, unread, err := collect(ctx, &c, d, *accept == "")
 	if err != nil {
 		return err
 	}
@@ -400,6 +498,9 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if *accept != "" {
 		return acceptDevice(&c, inv, *accept, d)
 	}
+	if *acceptControl != "" {
+		return acceptControlSections(&c, inv, *acceptControl, d)
+	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
 		return err
@@ -414,6 +515,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	fmt.Fprintln(d.stdout, "Every device, owner, tag and route below is now accepted. Check that you recognise each one:")
 	fmt.Fprintln(d.stdout)
+	printControl(d.stdout, inv.Control, unread)
 	for _, dev := range inv.Devices {
 		extra := ""
 		if len(dev.Tags) > 0 {
@@ -479,6 +581,86 @@ func acceptDevice(c *common, inv inventory.Inventory, query string, d deps) erro
 	}
 	fmt.Fprintf(d.stdout, "%s %s (%s, owner %s, tags %s) in %s\n", verb, report.Clean(dev.ShortName()),
 		report.Clean(dev.ID), report.Clean(firstNonEmpty(dev.Owner, "unknown")), report.Clean(listOrNone(dev.Tags)), c.baselinePath())
+	fmt.Fprintf(d.stdout, "Baseline sha256: %s (update any pin you keep)\n", base.Digest())
+	return nil
+}
+
+// printControl lists the control-plane state a baseline just accepted.
+// Descriptions, logins and nameservers are set by whoever controls the
+// tailnet, so they are sanitised like device names.
+func printControl(w io.Writer, c *inventory.Control, unread []string) {
+	if c == nil {
+		return
+	}
+	if c.Policy != nil {
+		fmt.Fprintf(w, "  policy file   sha256 %s, %d acls/grants entries\n", c.Policy.SHA256, len(c.Policy.Rules))
+	}
+	if c.AuthKeys != nil {
+		var ids []string
+		for _, k := range *c.AuthKeys {
+			ids = append(ids, k.ID)
+		}
+		fmt.Fprintf(w, "  keys          %d: %s\n", len(ids), report.Clean(listOrNone(ids)))
+	}
+	if c.DNS != nil {
+		fmt.Fprintf(w, "  nameservers   %s", report.Clean(listOrNone(c.DNS.Nameservers)))
+		if n := len(c.DNS.SplitDNS); n > 0 {
+			fmt.Fprintf(w, "; split DNS for %d domains", n)
+		}
+		fmt.Fprintln(w)
+	}
+	if c.Users != nil {
+		var users []string
+		for _, u := range *c.Users {
+			users = append(users, u.LoginName+" ("+u.Role+")")
+		}
+		fmt.Fprintf(w, "  users         %s\n", report.Clean(listOrNone(users)))
+	}
+	if len(unread) > 0 {
+		fmt.Fprintf(w, "  not recorded  %s (the credential cannot read them)\n", strings.Join(unread, ", "))
+	}
+	fmt.Fprintln(w)
+}
+
+// acceptControlSections records the named control-plane sections' current
+// state in the existing baseline: the way to accept a policy edit, a new
+// key or user, or a DNS change without re-accepting every device.
+func acceptControlSections(c *common, inv inventory.Inventory, list string, d deps) error {
+	base, err := baseline.Load(c.baselinePath())
+	if err != nil {
+		return err
+	}
+	if base.Source != inventory.SourceAPI || inv.Control == nil {
+		return fmt.Errorf("--accept-control needs the api source for both the scan and the baseline (the baseline is from %s)", base.Source)
+	}
+	var names []string
+	for _, n := range strings.Split(list, ",") {
+		switch n = strings.ToLower(strings.TrimSpace(n)); n {
+		case "":
+		case "all":
+			names = append(names, baseline.Sections...)
+		default:
+			if !slices.Contains(baseline.Sections, n) {
+				return fmt.Errorf("--accept-control: unknown section %q; use %s, or all", n, strings.Join(baseline.Sections, ", "))
+			}
+			names = append(names, n)
+		}
+	}
+	if len(names) == 0 {
+		return errors.New("--accept-control: name one or more of " + strings.Join(baseline.Sections, ", ") + ", or all")
+	}
+	if base.Control == nil {
+		base.Control = &baseline.Control{}
+	}
+	for _, n := range names {
+		if !base.Control.Take(inv.Control, n) {
+			return fmt.Errorf("--accept-control: the credential cannot read the %s section, so there is nothing to accept", n)
+		}
+	}
+	if err := baseline.Save(c.baselinePath(), base, true); err != nil {
+		return err
+	}
+	fmt.Fprintf(d.stdout, "Accepted the tailnet's current %s into %s\n", strings.Join(names, ", "), c.baselinePath())
 	fmt.Fprintf(d.stdout, "Baseline sha256: %s (update any pin you keep)\n", base.Digest())
 	return nil
 }
@@ -775,6 +957,9 @@ func cmdRules(args []string, d deps) error {
 	}
 	for _, r := range rules.All() {
 		fmt.Fprintf(d.stdout, "%-22s %-7s %s\n", r.ID, r.Severity, r.Summary)
+	}
+	for _, r := range rules.AllControl() {
+		fmt.Fprintf(d.stdout, "%-22s %-7s %s (tailnet-wide, api only)\n", r.ID, r.Severity, r.Summary)
 	}
 	return nil
 }
