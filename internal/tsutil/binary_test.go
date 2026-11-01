@@ -66,6 +66,9 @@ func TestBinaryPrefersInstallLocationOverPath(t *testing.T) {
 }
 
 func TestBinaryFallsBackToPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows trusts only the install location; see TestBinaryRefusesPathOnWindows")
+	}
 	pathDir := t.TempDir()
 	onPath := writeFakeTailscale(t, pathDir, "nFROMPATH")
 	useTrusted(t, filepath.Join(t.TempDir(), "missing"))
@@ -86,6 +89,43 @@ func TestBinaryRefusesWritableLocation(t *testing.T) {
 	}
 	useTrusted(t, p)
 	if _, err := binary(); err == nil || !strings.Contains(err.Error(), "writable by other users") {
+		t.Fatalf("binary() err = %v, want a refusal", err)
+	}
+}
+
+// A symlink in a safe directory must not vouch for a target that others
+// could replace.
+func TestBinaryRefusesSymlinkIntoWritableDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows trusts only the install location")
+	}
+	writable := t.TempDir()
+	target := writeFakeTailscale(t, writable, "nANY")
+	if err := os.Chmod(writable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "tailscale")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	useTrusted(t, link)
+	if _, err := binary(); err == nil || !strings.Contains(err.Error(), "writable by other users") {
+		t.Fatalf("binary() err = %v, want a refusal", err)
+	}
+}
+
+// On Windows mode bits say nothing, so only the install location is
+// trusted: a tailscale.exe found on PATH is refused.
+func TestBinaryRefusesPathOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows only")
+	}
+	pathDir := t.TempDir()
+	writeFakeTailscale(t, pathDir, "nFROMPATH")
+	useTrusted(t, filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("PATH", pathDir)
+	t.Setenv("PATHEXT", ".BAT")
+	if _, err := binary(); err == nil || !strings.Contains(err.Error(), "only Tailscale's install location") {
 		t.Fatalf("binary() err = %v, want a refusal", err)
 	}
 }
