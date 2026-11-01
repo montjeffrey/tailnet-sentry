@@ -285,11 +285,17 @@ var controlSections = []controlSection{
 		}},
 }
 
+// readFailed starts the Unread reason of a section whose request failed, as
+// opposed to one the credential has no scope for.
+const readFailed = "request failed: "
+
 // collectControl reads each control-plane section with a client of its own,
-// asking for that section's scope alone. The device list has already been
-// read with the same credential, so a refusal here means the credential
-// lacks the scope: the section is left unknown, a note goes to stderr, and
-// the scan carries on. Any other failure is an error, as it is for devices.
+// asking for that section's scope alone. A section that cannot be read is
+// left unknown, with the reason in Control.Unread and a note on stderr, and
+// the rest of the scan carries on: a failed policy read must not also hide
+// the device findings. The rules then report any section the baseline relies
+// on going dark (control-unreadable). The device list has already been read
+// with the same credential, so a refusal means the credential lacks the scope.
 func collectControl(ctx context.Context, c *common, d deps) (*inventory.Control, []string, error) {
 	ctl := &inventory.Control{}
 	var unread []string
@@ -299,39 +305,43 @@ func collectControl(ctx context.Context, c *common, d deps) (*inventory.Control,
 			return nil, nil, err
 		}
 		err = s.read(ctx, client, ctl)
-		if tsapi.ScopeDenied(err) {
-			skipped := s.rules
-			if s.name == baseline.SectionPolicy {
-				skipped += " and policy-permissive"
-			}
-			fmt.Fprintf(d.stderr, "sentry: note: cannot read the %s (the credential needs %s); %s skipped\n", s.what, s.scope, skipped)
-			unread = append(unread, s.name)
+		if err == nil {
 			continue
 		}
-		if err != nil {
-			return nil, nil, err
+		why := "the credential lacks " + string(s.scope)
+		if !tsapi.ScopeDenied(err) {
+			why = readFailed + err.Error()
 		}
+		skipped := s.rules
+		if s.name == baseline.SectionPolicy {
+			skipped += " and policy-permissive"
+		}
+		fmt.Fprintf(d.stderr, "sentry: note: cannot read the %s (%s); %s skipped\n", s.what, why, skipped)
+		if ctl.Unread == nil {
+			ctl.Unread = map[string]string{}
+		}
+		ctl.Unread[s.name] = why
+		unread = append(unread, s.name)
 	}
 	return ctl, unread, nil
 }
 
-// noteControlGaps tells the operator which drift rules this baseline cannot
-// support: sections the scan read but the baseline never recorded, and
-// sections the baseline has that the credential can no longer read.
-func noteControlGaps(w io.Writer, inv inventory.Inventory, base *baseline.Baseline, unread []string) {
-	if inv.Control == nil {
+// noteSSHGaps says when ssh-enabled cannot judge some devices: records from
+// before sentry tracked Tailscale SSH carry no sshEnabled, and --accept-control
+// does not fill them in.
+func noteSSHGaps(w io.Writer, inv inventory.Inventory, base *baseline.Baseline) {
+	if inv.Source != inventory.SourceAPI {
 		return
 	}
-	for _, s := range controlSections {
-		has := base.Control.Has(s.name)
-		switch {
-		case slices.Contains(unread, s.name) && has:
-			fmt.Fprintf(w, "sentry: note: the baseline records the %s but this credential can no longer read it; "+
-				"if you did not narrow the credential, find out who did\n", s.what)
-		case !slices.Contains(unread, s.name) && !has:
-			fmt.Fprintf(w, "sentry: note: the baseline has no record of the %s, so %s cannot compare it; "+
-				"`sentry baseline --accept-control %s` records it\n", s.what, s.rules, s.name)
+	n := 0
+	for _, dev := range inv.Devices {
+		if r := base.Lookup(dev.ID); r != nil && r.SSHEnabled == nil {
+			n++
 		}
+	}
+	if n > 0 {
+		fmt.Fprintf(w, "sentry: note: %d baseline device records predate Tailscale SSH tracking, so ssh-enabled cannot "+
+			"compare them; `sentry baseline --accept <device>` or a fresh baseline records it\n", n)
 	}
 }
 
@@ -421,7 +431,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 			"Scan with --source %s, or re-record the baseline", base.Source, inv.Source, base.Source)
 	}
 
-	noteControlGaps(d.stderr, inv, &base, unread)
+	noteSSHGaps(d.stderr, inv, &base)
 
 	now := d.now()
 	findings := rules.Evaluate(inv, &base, cfg, now)
@@ -473,6 +483,9 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if err := c.check(); err != nil {
 		return err
 	}
+	if (*digest || *reseal) && (*accept != "" || *acceptControl != "") {
+		return errors.New("--digest and --reseal act on the file alone; run --accept or --accept-control separately")
+	}
 	if *digest || *reseal {
 		if *digest && *reseal {
 			return errors.New("--digest and --reseal are separate actions; pick one")
@@ -485,6 +498,15 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	inv, unread, err := collect(ctx, &c, d, *accept == "")
 	if err != nil {
 		return err
+	}
+	// Recording known-good state past a failed read would leave that section
+	// out of the baseline for no reason the operator chose.
+	if inv.Control != nil {
+		for _, s := range controlSections {
+			if why := inv.Control.Unread[s.name]; strings.HasPrefix(why, readFailed) {
+				return fmt.Errorf("cannot read the %s: %s", s.what, strings.TrimPrefix(why, readFailed))
+			}
+		}
 	}
 	// A baseline is what later scans call healthy. One recorded from the
 	// local source silently leaves out devices this machine cannot see, so
@@ -652,15 +674,29 @@ func acceptControlSections(c *common, inv inventory.Inventory, list string, d de
 	if base.Control == nil {
 		base.Control = &baseline.Control{}
 	}
+	accepted := &inventory.Control{}
 	for _, n := range names {
 		if !base.Control.Take(inv.Control, n) {
-			return fmt.Errorf("--accept-control: the credential cannot read the %s section, so there is nothing to accept", n)
+			return fmt.Errorf("--accept-control: the %s section could not be read (%s), so there is nothing to accept",
+				n, firstNonEmpty(inv.Control.Unread[n], "unknown reason"))
+		}
+		switch n {
+		case baseline.SectionPolicy:
+			accepted.Policy = inv.Control.Policy
+		case baseline.SectionAuthKeys:
+			accepted.AuthKeys = inv.Control.AuthKeys
+		case baseline.SectionDNS:
+			accepted.DNS = inv.Control.DNS
+		case baseline.SectionUsers:
+			accepted.Users = inv.Control.Users
 		}
 	}
 	if err := baseline.Save(c.baselinePath(), base, true); err != nil {
 		return err
 	}
-	fmt.Fprintf(d.stdout, "Accepted the tailnet's current %s into %s\n", strings.Join(names, ", "), c.baselinePath())
+	fmt.Fprintf(d.stdout, "Accepted the tailnet's current %s into %s. Check that this is what you meant to accept:\n",
+		strings.Join(names, ", "), c.baselinePath())
+	printControl(d.stdout, accepted, nil)
 	fmt.Fprintf(d.stdout, "Baseline sha256: %s (update any pin you keep)\n", base.Digest())
 	return nil
 }

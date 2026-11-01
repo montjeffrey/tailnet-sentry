@@ -42,8 +42,8 @@ func (c *Client) Policy(ctx context.Context) (*inventory.Policy, error) {
 // The file is walked generically rather than decoded into a struct: Go's
 // decoder matches keys case-insensitively and keeps only the last duplicate,
 // so "ACLs" beside "acls" could otherwise hide a rule from the checks while
-// Tailscale still applies it. Every key that folds to "acls" or "grants" is
-// read.
+// Tailscale still applies it. Every key that folds to "acls", "grants" or
+// "ssh" is read.
 func ParsePolicy(raw []byte) (*inventory.Policy, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -72,7 +72,18 @@ func ParsePolicy(raw []byte) (*inventory.Policy, error) {
 			}
 		}
 	}
-	for _, section := range []string{"acls", "grants"} {
+	for _, v := range fold(top, "ipsets") {
+		sets, _ := v.(map[string]any)
+		for name, entries := range sets {
+			if p.IPSets == nil {
+				p.IPSets = map[string][]string{}
+			}
+			p.IPSets[name] = append(p.IPSets[name], strs(entries)...)
+		}
+	}
+	// Without either section Tailscale falls back to allowing everything.
+	p.NoRules = len(fold(top, "acls")) == 0 && len(fold(top, "grants")) == 0
+	for _, section := range []string{"acls", "grants", "ssh"} {
 		i := 0
 		for _, list := range fold(top, section) {
 			entries, _ := list.([]any)
@@ -80,12 +91,17 @@ func ParsePolicy(raw []byte) (*inventory.Policy, error) {
 				m, _ := e.(map[string]any)
 				r := inventory.PolicyRule{Section: section, Index: i}
 				i++
+				srcKeys, dstKeys := fold(m, "src"), fold(m, "dst")
 				// "users" and "ports" are the legacy names of an ACL's src
-				// and dst; Tailscale still accepts them.
-				for _, v := range append(fold(m, "src"), fold(m, "users")...) {
+				// and dst; Tailscale still accepts them. In an ssh rule
+				// "users" means local login names instead.
+				if section == "acls" {
+					srcKeys, dstKeys = append(srcKeys, fold(m, "users")...), append(dstKeys, fold(m, "ports")...)
+				}
+				for _, v := range srcKeys {
 					r.Src = append(r.Src, strs(v)...)
 				}
-				for _, v := range append(fold(m, "dst"), fold(m, "ports")...) {
+				for _, v := range dstKeys {
 					r.Dst = append(r.Dst, strs(v)...)
 				}
 				p.Rules = append(p.Rules, r)

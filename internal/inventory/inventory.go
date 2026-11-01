@@ -82,14 +82,18 @@ type Inventory struct {
 }
 
 // Control is the tailnet's control-plane configuration: the things an admin
-// login can change without touching any device. Each section is nil when the
-// credential could not read it (it lacks the scope), and every rule treats a
-// nil section as unknown, never as bad.
+// login can change without touching any device. Each section is nil when it
+// could not be read, and the drift rules treat a nil section as unknown,
+// never as bad. Unread says why for each such section, so that a section the
+// baseline relies on going dark is itself reported.
 type Control struct {
 	Policy   *Policy    `json:"policy,omitempty"`
 	AuthKeys *[]AuthKey `json:"authKeys,omitempty"`
 	DNS      *DNS       `json:"dns,omitempty"`
 	Users    *[]User    `json:"users,omitempty"`
+	// Unread maps a section name (as baseline.Sections spells it) to the
+	// reason it could not be read: a missing scope or a failed request.
+	Unread map[string]string `json:"-"`
 }
 
 // Policy is the tailnet policy file, reduced to what the rules check.
@@ -100,11 +104,17 @@ type Policy struct {
 	Rules  []PolicyRule `json:"rules,omitempty"`
 	// Hosts are the policy's named addresses, which a rule may use as src.
 	Hosts map[string]string `json:"hosts,omitempty"`
+	// IPSets are the policy's named address sets ("ipset:name"), each a
+	// list of entries as written.
+	IPSets map[string][]string `json:"ipsets,omitempty"`
+	// NoRules is set when the file has neither an acls nor a grants
+	// section, for which Tailscale applies its default allow-all policy.
+	NoRules bool `json:"noRules,omitempty"`
 }
 
-// PolicyRule is one entry of the policy's "acls" or "grants" list.
+// PolicyRule is one entry of the policy's "acls", "grants" or "ssh" list.
 type PolicyRule struct {
-	Section string   `json:"section"` // "acls" or "grants"
+	Section string   `json:"section"` // "acls", "grants" or "ssh"
 	Index   int      `json:"index"`
 	Src     []string `json:"src"`
 	Dst     []string `json:"dst"`

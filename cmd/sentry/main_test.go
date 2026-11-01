@@ -830,7 +830,7 @@ func TestMissingControlScopesAreUnknownNotBad(t *testing.T) {
 	if code != exitClean || !strings.Contains(out, "not recorded  policy, keys, dns, users") {
 		t.Fatalf("baseline: exit %d\n%s%s", code, out, errOut)
 	}
-	for _, want := range []string{"cannot read the policy file (the credential needs policy_file:read)",
+	for _, want := range []string{"cannot read the policy file (the credential lacks policy_file:read)",
 		"auth_keys:read", "dns:read", "users:read"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("baseline stderr lacks %q:\n%s", want, errOut)
@@ -854,13 +854,33 @@ func TestMissingControlScopesAreUnknownNotBad(t *testing.T) {
 	}
 }
 
-func TestCredentialNarrowedAfterTheBaselineIsNoted(t *testing.T) {
+// Taking a scope away from sentry's credential after the baseline is the
+// quiet way to switch its rules off, so the lost section is an anomaly.
+func TestCredentialNarrowedAfterTheBaselineIsAnAnomaly(t *testing.T) {
 	h := newHarness(t)
 	h.mustBaseline()
 	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/dns/nameservers": true} })
 	code, out, errOut := h.run("scan")
-	if code != exitClean || !strings.Contains(errOut, "the baseline records the DNS settings but this credential can no longer read it") {
+	if code != exitAnomalies || !strings.Contains(out, "control-unreadable") ||
+		!strings.Contains(out, "the baseline records the DNS settings but this scan could not read it (the credential lacks dns:read)") {
 		t.Errorf("exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// A control-plane read that fails outright is reported without losing the
+// device findings, and baseline refuses to record past it.
+func TestControlReadFailureKeepsDeviceFindings(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) { f.policy = "not json" })
+	h.api.add(intruder())
+	code, out, errOut := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "new-device") || !strings.Contains(out, "control-unreadable") ||
+		!strings.Contains(out, "request failed") {
+		t.Errorf("scan: exit %d\n%s%s", code, out, errOut)
+	}
+	if code, _, errOut := h.run("baseline", "--force"); code != exitError || !strings.Contains(errOut, "cannot read the policy file") {
+		t.Errorf("baseline past a failed read: exit %d %s", code, errOut)
 	}
 }
 
@@ -894,20 +914,24 @@ func TestAcceptControlClearsOneSection(t *testing.T) {
 		{"baseline", "--accept-control", "routes"},
 		{"baseline", "--accept-control", ","},
 		{"baseline", "--accept-control", "dns", "--accept", "desktop"},
+		{"baseline", "--accept-control", "dns", "--reseal"},
+		{"baseline", "--accept", "desktop", "--digest"},
 	} {
 		if code, _, _ := h.run(args...); code != exitError {
 			t.Errorf("%v: exit %d, want %d", args, code, exitError)
 		}
 	}
 	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/users": true} })
-	if code, _, errOut := h.run("baseline", "--accept-control", "users"); code != exitError || !strings.Contains(errOut, "cannot read the users section") {
+	if code, _, errOut := h.run("baseline", "--accept-control", "users"); code != exitError || !strings.Contains(errOut, "the users section could not be read") {
 		t.Errorf("accepting an unreadable section: exit %d %s", code, errOut)
 	}
 }
 
 // A baseline written before sentry watched the control plane has no control
-// section and no sshEnabled. It still verifies, every new drift rule stays
-// quiet about what it cannot compare, and the gaps are named on stderr.
+// section and no sshEnabled. It still verifies, and the drift rules stay quiet
+// about what they cannot compare, but each missing section is a
+// control-unbaselined finding until it is accepted, and the sshEnabled gap is
+// named on stderr.
 func TestBaselineFromBeforeControlChecks(t *testing.T) {
 	h := newHarness(t)
 	h.mustBaseline()
@@ -936,12 +960,19 @@ func TestBaselineFromBeforeControlChecks(t *testing.T) {
 		f.nameservers = []string{"9.9.9.9"}
 	})
 	code, out, errOut := h.run("scan")
-	if code != exitClean {
+	if code != exitAnomalies || strings.Count(out, "control-unbaselined") != 4 || strings.Contains(out, "tailnet  dns-changed") ||
+		strings.Contains(out, "desktop  ssh-enabled") || !strings.Contains(out, "the baseline has no record of the DNS settings, so dns-changed cannot compare it") ||
+		!strings.Contains(out, "--accept-control policy") {
 		t.Errorf("legacy baseline: exit %d\n%s%s", code, out, errOut)
 	}
-	if !strings.Contains(errOut, "the baseline has no record of the DNS settings, so dns-changed cannot compare it") ||
-		!strings.Contains(errOut, "--accept-control policy") {
+	if !strings.Contains(errOut, "2 baseline device records predate Tailscale SSH tracking") {
 		t.Errorf("stderr:\n%s", errOut)
+	}
+	if code, out, errOut := h.run("baseline", "--accept-control", "all"); code != exitClean || !strings.Contains(out, "nameservers   9.9.9.9") {
+		t.Fatalf("accept-control all: exit %d\n%s%s", code, out, errOut)
+	}
+	if code, out, _ := h.run("scan"); code != exitClean {
+		t.Errorf("after accepting the control plane: exit %d\n%s", code, out)
 	}
 	// policy-permissive needs no baseline, so it still runs.
 	h.api.set(func(f *fakeAPI) { f.policy = `{"grants":[{"src":["autogroup:tagged"],"dst":["*"],"ip":["*"]}]}` })

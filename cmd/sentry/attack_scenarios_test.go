@@ -129,6 +129,43 @@ func TestAttackScenarios(t *testing.T) {
 						"create": map[string]any{"reusable": false}}}})
 			})
 		}, []string{"auth-key-risky"}},
+		{"API access token minted for persistence", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kAPITOKEN", "keyType": "api", "created": "2026-10-12T11:00:00Z",
+					"expires": "2027-01-10T11:00:00Z"})
+			})
+		}, []string{"credential-new"}},
+		{"OAuth client created for persistence", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kCLIENT", "keyType": "client", "created": "2026-10-12T11:00:00Z"})
+			})
+		}, []string{"credential-new"}},
+		{"sentry's DNS scope revoked before a DNS hijack", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.deny = map[string]bool{"/tailnet/-/dns/nameservers": true, "/tailnet/-/dns/split-dns": true}
+				f.nameservers = []string{"203.0.113.53"}
+			})
+		}, []string{"control-unreadable"}},
+		{"sentry's policy scope revoked before the policy is opened up", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.deny = map[string]bool{"/tailnet/-/acl": true}
+				f.policy = `{"grants":[{"src":["*"],"dst":["*"],"ip":["*"]}]}`
+			})
+		}, []string{"control-unreadable"}},
+		{"policy opened to tagged devices through an ssh rule", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"acls":[{"action":"accept","src":["autogroup:member"],"dst":["autogroup:member:*"]}],
+				             "ssh":[{"action":"accept","src":["autogroup:tagged"],"dst":["autogroup:self"],"users":["root"]}]}`
+			})
+		}, []string{"policy-permissive"}},
+		{"policy opened to half the tailnet by address range", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"acls":[{"action":"accept","src":["100.64.0.0-100.95.255.255"],"dst":["*:*"]}]}`
+			})
+		}, []string{"policy-permissive"}},
+		{"policy access sections deleted, falling back to allow-all", func(h *harness) {
+			h.api.set(func(f *fakeAPI) { f.policy = `{"tagOwners":{"tag:quarantine":["autogroup:admin"]}}` })
+		}, []string{"policy-permissive"}},
 		{"global nameserver swapped for DNS hijack", func(h *harness) {
 			h.api.set(func(f *fakeAPI) { f.nameservers = []string{"203.0.113.53"} })
 		}, []string{"dns-changed"}},

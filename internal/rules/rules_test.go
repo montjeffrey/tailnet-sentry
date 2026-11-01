@@ -474,6 +474,11 @@ func TestPolicyPermissive(t *testing.T) {
 		return &inventory.Control{Policy: &inventory.Policy{Hosts: hosts,
 			Rules: []inventory.PolicyRule{{Section: "grants", Index: 3, Src: src, Dst: []string{"tag:server"}}}}}
 	}
+	ipsets := func(sets map[string][]string, src ...string) *inventory.Control {
+		c := pol(nil, src...)
+		c.Policy.IPSets = sets
+		return c
+	}
 	runControl(t, PolicyPermissive, []controlCase{
 		{name: "members only", cur: pol(nil, "autogroup:member", "group:admins", "alice@github")},
 		{name: "allow all", cur: pol(nil, "*"), want: `grants[3] has src "*" (to tag:server)`},
@@ -484,13 +489,69 @@ func TestPolicyPermissive(t *testing.T) {
 		{name: "wider than the range", cur: pol(nil, "0.0.0.0/0"), want: "0.0.0.0/0"},
 		{name: "whole v6 range", cur: pol(nil, "fd7a:115c:a1e0::/48"), want: "fd7a"},
 		{name: "one host address", cur: pol(nil, "100.64.0.5/32")},
-		{name: "part of the range", cur: pol(nil, "100.64.0.0/16")},
+		{name: "part of the range", cur: pol(nil, "100.64.0.0/16"), want: "100.64.0.0/16"},
+		{name: "one half of the range", cur: pol(nil, "100.96.0.0/11"), want: "100.96.0.0/11"},
+		{name: "one bare address", cur: pol(nil, "100.64.0.5")},
+		{name: "a range", cur: pol(nil, "100.64.0.0-100.127.255.255"), want: "100.64.0.0-100.127.255.255"},
+		{name: "a range of two", cur: pol(nil, "100.64.0.5-100.64.0.6"), want: "100.64.0.5-100.64.0.6"},
+		{name: "a range of one", cur: pol(nil, "100.64.0.5-100.64.0.5")},
+		{name: "a range outside the tailnet", cur: pol(nil, "192.168.0.0-192.168.255.255")},
+		{name: "a host: alias", cur: pol(map[string]string{"all": "100.64.0.0/10"}, "host:all"), want: `"host:all"`},
+		{name: "an ipset", cur: ipsets(map[string][]string{"ipset:wide": {"192.168.1.0/24", "add:100.64.0.0/12"}}, "ipset:wide"), want: "ipset:wide"},
+		{name: "an ipset through another", cur: ipsets(map[string][]string{"ipset:a": {"ipset:b"}, "ipset:b": {"100.64.0.0/10"}}, "ipset:a"), want: "ipset:a"},
+		{name: "an ipset of one host", cur: ipsets(map[string][]string{"ipset:one": {"100.64.0.5", "remove:100.64.0.0/10"}}, "ipset:one")},
+		{name: "an ipset cycle ends", cur: ipsets(map[string][]string{"ipset:a": {"ipset:a"}}, "ipset:a")},
+		{name: "no acls or grants", cur: &inventory.Control{Policy: &inventory.Policy{NoRules: true}}, want: "default allow-all"},
+		{name: "an ssh rule", want: `ssh[0] has src "autogroup:tagged"`, cur: &inventory.Control{Policy: &inventory.Policy{
+			Rules: []inventory.PolicyRule{{Section: "ssh", Src: []string{"autogroup:tagged"}, Dst: []string{"autogroup:self"}}}}}},
 		{name: "a hosts alias for the range", cur: pol(map[string]string{"everything": "100.64.0.0/10"}, "everything"), want: `"everything"`},
 		{name: "a hosts alias for a LAN", cur: pol(map[string]string{"lan": "192.168.1.0/24"}, "lan")},
 		{name: "case does not hide it", cur: pol(nil, "AutoGroup:Tagged"), want: "AutoGroup:Tagged"},
 		{name: "unreadable", cur: &inventory.Control{}},
 		{name: "two bad rules, two details", n: 2, want: "quarantined device", cur: &inventory.Control{Policy: &inventory.Policy{
 			Rules: []inventory.PolicyRule{{Section: "acls", Src: []string{"*"}}, {Section: "grants", Src: []string{"autogroup:tagged"}}}}}},
+	})
+}
+
+func TestControlGaps(t *testing.T) {
+	policy := &baseline.PolicyRecord{SHA256: "a"}
+	recorded := baseWith(&baseline.Control{Policy: policy, DNS: &baseline.DNSRecord{}})
+	full := &inventory.Control{Policy: &inventory.Policy{SHA256: "a"}, DNS: &inventory.DNS{}}
+	runControl(t, ControlUnreadable, []controlCase{
+		{name: "everything recorded is read", cur: full, base: recorded},
+		{name: "a recorded section goes dark", base: recorded, want: "the baseline records the DNS settings but this scan could not read it (the credential lacks dns:read)",
+			cur: &inventory.Control{Policy: full.Policy, Unread: map[string]string{baseline.SectionDNS: "the credential lacks dns:read"}}},
+		{name: "never recorded, never read", cur: &inventory.Control{Policy: full.Policy}, base: baseWith(&baseline.Control{Policy: policy})},
+		{name: "a failed policy read names both rules", base: recorded, want: "policy-changed and policy-permissive did not run",
+			cur: &inventory.Control{DNS: full.DNS, Unread: map[string]string{baseline.SectionPolicy: "request failed: boom"}}},
+	})
+	runControl(t, ControlUnbaselined, []controlCase{
+		{name: "recorded", cur: full, base: recorded},
+		{name: "read but never recorded", n: 2, want: "the baseline has no record of the", base: baseWith(nil), cur: full},
+		{name: "unread and unrecorded is the operator's choice", cur: &inventory.Control{}, base: baseWith(nil)},
+	})
+}
+
+func TestCredentialNew(t *testing.T) {
+	key := func(id, kind string, mut ...func(*inventory.AuthKey)) inventory.AuthKey {
+		k := inventory.AuthKey{ID: id, KeyType: kind, Created: now.Add(-time.Hour), Expires: now.Add(days(90))}
+		for _, m := range mut {
+			m(&k)
+		}
+		return k
+	}
+	keys := func(ks ...inventory.AuthKey) *inventory.Control { return &inventory.Control{AuthKeys: &ks} }
+	accepted := baseWith(&baseline.Control{AuthKeys: &[]string{"kOLD"}})
+	runControl(t, CredentialNew, []controlCase{
+		{name: "accepted token", cur: keys(key("kOLD", "api")), base: accepted},
+		{name: "new API token", cur: keys(key("kNEW", "api")), base: accepted, want: "new API access token kNEW created 2026-10-12"},
+		{name: "new OAuth client, named", cur: keys(key("kNEW", "client", func(k *inventory.AuthKey) { k.Description = "ci" })), base: accepted, want: `new OAuth client kNEW ("ci")`},
+		{name: "an auth key is auth-key-risky's", cur: keys(key("kNEW", "auth")), base: accepted},
+		{name: "revoked", cur: keys(key("kNEW", "api", func(k *inventory.AuthKey) { k.Revoked = true })), base: accepted},
+		{name: "expired", cur: keys(key("kNEW", "api", func(k *inventory.AuthKey) { k.Expires = now.Add(-time.Minute) })), base: accepted},
+		{name: "no key list: older token accepted", cur: keys(key("kNEW", "api", func(k *inventory.AuthKey) { k.Created = now.Add(-days(5)) })), base: baseWith(nil)},
+		{name: "no key list: newer token flagged", cur: keys(key("kNEW", "api")), base: baseWith(nil), want: "kNEW"},
+		{name: "unreadable", cur: &inventory.Control{}, base: accepted},
 	})
 }
 

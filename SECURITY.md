@@ -51,7 +51,8 @@ redirects are refused.
   `policy_file:read`, `auth_keys:read`, `dns:read` and `users:read` when scan
   and baseline read the control plane, and `devices:core` only for
   `isolate --apply` and `release --apply`. Tokens live in memory only. A scope
-  the client lacks makes that section unknown, never an error or a finding.
+  the client lacks makes that section unknown, never an error; it is a finding
+  (`control-unreadable`) only once the baseline records that section.
 - The key list is read for key metadata (ID, type, dates, capabilities). The
   API does not return key secrets there, and sentry records only key IDs.
 - HTTP redirects from the API are refused rather than followed.
