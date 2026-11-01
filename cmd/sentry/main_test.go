@@ -47,6 +47,26 @@ func intruder() apiDev {
 		"expires": "2027-06-01T00:00:00Z", "authorized": true, "tags": []string{"tag:ci"}}
 }
 
+// healthyPolicy is the example quarantine policy's shape: members reach
+// each other, and nothing names *, autogroup:tagged or tag:quarantine.
+const healthyPolicy = `{
+  "tagOwners": {"tag:quarantine": ["autogroup:admin"], "tag:server": ["autogroup:admin"]},
+  "grants": [{"src": ["autogroup:member"], "dst": ["autogroup:member", "tag:server"], "ip": ["*"]}],
+  "ssh": [{"action": "check", "src": ["autogroup:member"], "dst": ["autogroup:self"], "users": ["autogroup:nonroot"]}]
+}`
+
+func healthyKeys() []apiDev {
+	return []apiDev{{"id": "kNASJOIN", "keyType": "auth", "description": "nas", "created": "2026-10-01T00:00:00Z",
+		"expires": "2026-10-02T00:00:00Z", "capabilities": map[string]any{"devices": map[string]any{"create": map[string]any{"reusable": false}}}}}
+}
+
+func healthyUsers() []apiDev {
+	return []apiDev{
+		{"id": "u1", "loginName": "alice@github", "role": "owner", "type": "member", "status": "active"},
+		{"id": "u2", "loginName": "bob@github", "role": "member", "type": "member", "status": "active"},
+	}
+}
+
 type fakeAPI struct {
 	mu       sync.Mutex
 	devices  []apiDev
@@ -55,6 +75,20 @@ type fakeAPI struct {
 	fail     int      // forced status for writes
 	failMsg  string   // body for forced failures
 	failPath string   // when set, only writes to paths ending in this fail
+
+	policy      string
+	keys        []apiDev
+	nameservers []string
+	splitDNS    map[string][]string
+	users       []apiDev
+	deny        map[string]bool // GET paths answered 403, as for a missing scope
+}
+
+// set changes the fake's state under its lock.
+func (f *fakeAPI) set(change func(f *fakeAPI)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(f)
 }
 
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,9 +98,24 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
+	if r.Method == http.MethodGet && f.deny[r.URL.Path] {
+		http.Error(w, `{"message":"calling actor does not have enough permissions to perform this function"}`, http.StatusForbidden)
+		return
+	}
+	enc := json.NewEncoder(w)
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/devices":
-		_ = json.NewEncoder(w).Encode(map[string]any{"devices": f.devices})
+		_ = enc.Encode(map[string]any{"devices": f.devices})
+	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/acl":
+		_, _ = io.WriteString(w, f.policy)
+	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/keys":
+		_ = enc.Encode(map[string]any{"keys": f.keys})
+	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/dns/nameservers":
+		_ = enc.Encode(map[string]any{"dns": f.nameservers})
+	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/dns/split-dns":
+		_ = enc.Encode(f.splitDNS)
+	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/users":
+		_ = enc.Encode(map[string]any{"users": f.users})
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/device/"):
 		f.attempts = append(f.attempts, r.URL.Path)
 		if f.fail != 0 && (f.failPath == "" || strings.HasSuffix(r.URL.Path, f.failPath)) {
@@ -138,7 +187,9 @@ type harness struct {
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	h := &harness{t: t, api: &fakeAPI{devices: healthyDevices()}, stateDir: t.TempDir(),
+	api := &fakeAPI{devices: healthyDevices(), policy: healthyPolicy, keys: healthyKeys(),
+		nameservers: []string{"1.1.1.1"}, splitDNS: map[string][]string{"corp.example": {"192.168.1.53"}}, users: healthyUsers()}
+	h := &harness{t: t, api: api, stateDir: t.TempDir(),
 		env:  map[string]string{tsapi.EnvAPIKey: testKey},
 		self: tsutil.Self{ID: "nDESKTOPCNTRL", Addresses: []string{"100.64.0.1"}, Version: "1.104.2-tabc"}}
 	h.srv = httptest.NewServer(h.api)
@@ -760,6 +811,209 @@ func TestReleaseTagSources(t *testing.T) {
 			}
 		}
 	})
+}
+
+var controlPaths = []string{"/tailnet/-/acl", "/tailnet/-/keys", "/tailnet/-/dns/nameservers", "/tailnet/-/users"}
+
+// A credential without the control-plane scopes still scans devices; every
+// control section is unknown, said so on stderr and in the report, and
+// never turned into a finding, even when the hidden state is bad.
+func TestMissingControlScopesAreUnknownNotBad(t *testing.T) {
+	h := newHarness(t)
+	h.api.set(func(f *fakeAPI) {
+		f.deny = map[string]bool{}
+		for _, p := range controlPaths {
+			f.deny[p] = true
+		}
+	})
+	code, out, errOut := h.run("baseline")
+	if code != exitClean || !strings.Contains(out, "not recorded  policy, keys, dns, users") {
+		t.Fatalf("baseline: exit %d\n%s%s", code, out, errOut)
+	}
+	for _, want := range []string{"cannot read the policy file (the credential lacks policy_file:read)",
+		"auth_keys:read", "dns:read", "users:read"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("baseline stderr lacks %q:\n%s", want, errOut)
+		}
+	}
+	h.api.set(func(f *fakeAPI) {
+		f.policy = `{"acls":[{"action":"accept","src":["*"],"dst":["*:*"]}]}`
+		f.nameservers = []string{"203.0.113.53"}
+	})
+	code, out, errOut = h.run("scan")
+	if code != exitClean || !strings.Contains(out, "Not checked (the credential cannot read them): policy, keys, dns, users.") {
+		t.Errorf("scan: exit %d\n%s%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "policy-changed and policy-permissive skipped") {
+		t.Errorf("scan stderr:\n%s", errOut)
+	}
+	_, out, _ = h.run("scan", "--json")
+	var rep struct{ Unread []string }
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || strings.Join(rep.Unread, ",") != "policy,keys,dns,users" {
+		t.Errorf("json unread = %v, %v", rep.Unread, err)
+	}
+}
+
+// Taking a scope away from sentry's credential after the baseline is the
+// quiet way to switch its rules off, so the lost section is an anomaly.
+func TestCredentialNarrowedAfterTheBaselineIsAnAnomaly(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/dns/nameservers": true} })
+	code, out, errOut := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "control-unreadable") ||
+		!strings.Contains(out, "the baseline records the DNS settings but this scan could not read it (the credential lacks dns:read)") {
+		t.Errorf("exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// A control-plane read that fails outright is reported without losing the
+// device findings, and baseline refuses to record past it.
+func TestControlReadFailureKeepsDeviceFindings(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) { f.policy = "not json" })
+	h.api.add(intruder())
+	code, out, errOut := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "new-device") || !strings.Contains(out, "control-unreadable") ||
+		!strings.Contains(out, "request failed") {
+		t.Errorf("scan: exit %d\n%s%s", code, out, errOut)
+	}
+	if code, _, errOut := h.run("baseline", "--force"); code != exitError || !strings.Contains(errOut, "cannot read the policy file") {
+		t.Errorf("baseline past a failed read: exit %d %s", code, errOut)
+	}
+	// A failure in one section does not block accepting another.
+	h.api.set(func(f *fakeAPI) { f.nameservers = []string{"9.9.9.9"} })
+	if code, out, errOut := h.run("baseline", "--accept-control", "dns"); code != exitClean {
+		t.Errorf("accept dns while the policy read fails: exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// Re-recording the baseline with a credential that has lost a scope would
+// drop that section, and with it the only rule that notices the loss.
+func TestForcedBaselineKeepsWatchedSections(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/users": true} })
+	code, _, errOut := h.run("baseline", "--force")
+	if code != exitError || !strings.Contains(errOut, "the existing baseline records the user list but this credential cannot read it") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	if err := os.Remove(h.baselineFile()); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := h.run("baseline"); code != exitClean || !strings.Contains(out, "not recorded  users") {
+		t.Errorf("a fresh baseline without the scope: exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+func TestAcceptControlClearsOneSection(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) {
+		f.nameservers = []string{"9.9.9.9"}
+		f.users = append(f.users, apiDev{"id": "u3", "loginName": "carol@github", "role": "member"})
+	})
+	code, out, _ := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "dns-changed") || !strings.Contains(out, "new-user") ||
+		!strings.Contains(out, "Tailnet configuration: 2 findings") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	code, out, errOut := h.run("baseline", "--accept-control", "dns")
+	if code != exitClean || !strings.Contains(out, "Accepted the tailnet's current dns") {
+		t.Fatalf("accept: exit %d\n%s%s", code, out, errOut)
+	}
+	code, out, _ = h.run("scan")
+	if code != exitAnomalies || strings.Contains(out, "dns-changed") || !strings.Contains(out, "new-user") {
+		t.Errorf("only dns should be accepted: exit %d\n%s", code, out)
+	}
+	if code, out, _ := h.run("baseline", "--accept-control", "all"); code != exitClean {
+		t.Fatalf("accept all: exit %d\n%s", code, out)
+	}
+	if code, out, _ := h.run("scan"); code != exitClean {
+		t.Errorf("after accepting all: exit %d\n%s", code, out)
+	}
+	for _, args := range [][]string{
+		{"baseline", "--accept-control", "routes"},
+		{"baseline", "--accept-control", ","},
+		{"baseline", "--accept-control", "dns", "--accept", "desktop"},
+		{"baseline", "--accept-control", "dns", "--reseal"},
+		{"baseline", "--accept", "desktop", "--digest"},
+	} {
+		if code, _, _ := h.run(args...); code != exitError {
+			t.Errorf("%v: exit %d, want %d", args, code, exitError)
+		}
+	}
+	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/users": true} })
+	if code, _, errOut := h.run("baseline", "--accept-control", "users"); code != exitError || !strings.Contains(errOut, "the users section could not be read") {
+		t.Errorf("accepting an unreadable section: exit %d %s", code, errOut)
+	}
+}
+
+// A baseline written before sentry watched the control plane has no control
+// section and no sshEnabled. It still verifies, and the drift rules stay quiet
+// about what they cannot compare, but each missing section is a
+// control-unbaselined finding until it is accepted, and the sshEnabled gap is
+// named on stderr.
+func TestBaselineFromBeforeControlChecks(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	data, err := os.ReadFile(h.baselineFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "control")
+	delete(raw, "sha256")
+	for _, d := range raw["devices"].([]any) {
+		delete(d.(map[string]any), "sshEnabled")
+	}
+	legacy, _ := json.MarshalIndent(raw, "", "  ")
+	if err := os.WriteFile(h.baselineFile(), legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := h.run("baseline", "--reseal"); code != exitClean {
+		t.Fatal("reseal failed")
+	}
+	h.api.set(func(f *fakeAPI) {
+		f.devices[0]["sshEnabled"] = true
+		f.nameservers = []string{"9.9.9.9"}
+	})
+	code, out, errOut := h.run("scan")
+	if code != exitAnomalies || strings.Count(out, "control-unbaselined") != 4 || strings.Contains(out, "tailnet  dns-changed") ||
+		strings.Contains(out, "desktop  ssh-enabled") || !strings.Contains(out, "the baseline has no record of the DNS settings, so dns-changed cannot compare it") ||
+		!strings.Contains(out, "--accept-control policy") {
+		t.Errorf("legacy baseline: exit %d\n%s%s", code, out, errOut)
+	}
+	if !strings.Contains(errOut, "2 baseline device records predate Tailscale SSH tracking") {
+		t.Errorf("stderr:\n%s", errOut)
+	}
+	if code, out, errOut := h.run("baseline", "--accept-control", "all"); code != exitClean || !strings.Contains(out, "nameservers   9.9.9.9") {
+		t.Fatalf("accept-control all: exit %d\n%s%s", code, out, errOut)
+	}
+	if code, out, _ := h.run("scan"); code != exitClean {
+		t.Errorf("after accepting the control plane: exit %d\n%s", code, out)
+	}
+	// policy-permissive needs no baseline, so it still runs.
+	h.api.set(func(f *fakeAPI) { f.policy = `{"grants":[{"src":["autogroup:tagged"],"dst":["*"],"ip":["*"]}]}` })
+	if code, out, _ := h.run("scan"); code != exitAnomalies || !strings.Contains(out, "policy-permissive") {
+		t.Errorf("permissive policy on a legacy baseline: exit %d\n%s", code, out)
+	}
+}
+
+func TestLocalSourceSkipsTheControlPlane(t *testing.T) {
+	h := newHarness(t)
+	h.env = map[string]string{}
+	if code, _, errOut := h.run("baseline", "--allow-partial"); code != exitClean {
+		t.Fatalf("baseline: %s", errOut)
+	}
+	code, out, errOut := h.run("scan")
+	if code != exitClean || strings.Contains(errOut, "note") || strings.Contains(out, "Not checked") {
+		t.Errorf("exit %d\n%s%s", code, out, errOut)
+	}
 }
 
 func TestQuarantineTagDoesNotHideADevice(t *testing.T) {

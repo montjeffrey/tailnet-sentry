@@ -4,7 +4,8 @@
 // The baseline is the operator's statement of accepted risk: a device, owner,
 // tag or route recorded here is not reported again. That makes recording it a
 // security decision, so Save refuses to replace an existing baseline unless
-// asked to, and the file holds device metadata only, never a credential.
+// asked to, and the file holds device and tailnet configuration metadata
+// only (key IDs, never keys), never a credential.
 package baseline
 
 import (
@@ -48,6 +49,122 @@ type Record struct {
 	External          bool      `json:"external,omitempty"`
 	AdvertisedRoutes  []string  `json:"advertisedRoutes,omitempty"`
 	ExitNode          bool      `json:"exitNode"`
+	// SSHEnabled is nil in baselines written before sentry recorded it, which
+	// the rules read as unknown rather than as "was off".
+	SSHEnabled *bool `json:"sshEnabled,omitempty"`
+}
+
+// Control is the accepted control-plane state. Every section is nil when it
+// was not recorded (the credential could not read it, or the baseline
+// predates it); the drift rules skip a nil section. All fields are omitted
+// when empty, so a baseline without them hashes exactly as before.
+type Control struct {
+	Policy   *PolicyRecord `json:"policy,omitempty"`
+	AuthKeys *[]string     `json:"authKeys,omitempty"` // IDs of keys that existed and were accepted
+	DNS      *DNSRecord    `json:"dns,omitempty"`
+	Users    *[]UserRecord `json:"users,omitempty"`
+}
+
+// PolicyRecord pins the accepted policy file by its canonical digest.
+type PolicyRecord struct {
+	SHA256 string `json:"sha256"`
+}
+
+// DNSRecord is the accepted DNS configuration.
+type DNSRecord struct {
+	Nameservers []string            `json:"nameservers"`
+	SplitDNS    map[string][]string `json:"splitDns,omitempty"`
+}
+
+// UserRecord is one accepted login and the role it had.
+type UserRecord struct {
+	ID        string `json:"id"`
+	LoginName string `json:"loginName"`
+	Role      string `json:"role"`
+}
+
+// Control sections, as named by `sentry baseline --accept-control`.
+const (
+	SectionPolicy   = "policy"
+	SectionAuthKeys = "keys"
+	SectionDNS      = "dns"
+	SectionUsers    = "users"
+)
+
+// Sections lists every control section name.
+var Sections = []string{SectionPolicy, SectionAuthKeys, SectionDNS, SectionUsers}
+
+// ControlFrom records the readable sections of c. It returns nil for a nil c.
+func ControlFrom(c *inventory.Control) *Control {
+	if c == nil {
+		return nil
+	}
+	out := &Control{}
+	for _, s := range Sections {
+		out.Take(c, s)
+	}
+	return out
+}
+
+// Take replaces one section with its state in c, and reports whether c had
+// that section to give.
+func (bc *Control) Take(c *inventory.Control, section string) bool {
+	if c == nil {
+		return false
+	}
+	switch section {
+	case SectionPolicy:
+		if c.Policy == nil {
+			return false
+		}
+		bc.Policy = &PolicyRecord{SHA256: c.Policy.SHA256}
+	case SectionAuthKeys:
+		if c.AuthKeys == nil {
+			return false
+		}
+		ids := []string{}
+		for _, k := range *c.AuthKeys {
+			ids = append(ids, k.ID)
+		}
+		sort.Strings(ids)
+		bc.AuthKeys = &ids
+	case SectionDNS:
+		if c.DNS == nil {
+			return false
+		}
+		bc.DNS = &DNSRecord{Nameservers: c.DNS.Nameservers, SplitDNS: c.DNS.SplitDNS}
+	case SectionUsers:
+		if c.Users == nil {
+			return false
+		}
+		users := []UserRecord{}
+		for _, u := range *c.Users {
+			users = append(users, UserRecord{ID: u.ID, LoginName: u.LoginName, Role: u.Role})
+		}
+		sort.Slice(users, func(i, j int) bool { return users[i].ID < users[j].ID })
+		bc.Users = &users
+	default:
+		return false
+	}
+	return true
+}
+
+// Has reports whether section was recorded.
+func (bc *Control) Has(section string) bool {
+	if bc == nil {
+		return false
+	}
+	switch section {
+	case SectionPolicy:
+		return bc.Policy != nil
+	case SectionAuthKeys:
+		return bc.AuthKeys != nil
+	case SectionDNS:
+		return bc.DNS != nil
+	case SectionUsers:
+		return bc.Users != nil
+	}
+	return false
 }
 
 // Baseline is the file's content.
@@ -56,6 +173,9 @@ type Baseline struct {
 	CreatedAt time.Time        `json:"createdAt"`
 	Source    inventory.Source `json:"source"`
 	Devices   []Record         `json:"devices"`
+	// Control is nil in baselines from the local source or from before
+	// sentry watched the control plane.
+	Control *Control `json:"control,omitempty"`
 	// Seal is the SHA-256 of the rest of the file, written by Save and checked
 	// by Load. It catches corruption and hand edits. It does not stop someone
 	// who can write the file from recomputing it; for that, pin Digest
@@ -100,9 +220,9 @@ func (b Baseline) CheckPin(pin string) error {
 
 // FromInventory records every device in inv as known-good.
 func FromInventory(inv inventory.Inventory, now time.Time) Baseline {
-	b := Baseline{Version: FormatVersion, CreatedAt: now.UTC(), Source: inv.Source}
+	b := Baseline{Version: FormatVersion, CreatedAt: now.UTC(), Source: inv.Source, Control: ControlFrom(inv.Control)}
 	for _, d := range inv.Devices {
-		b.Devices = append(b.Devices, Record{
+		rec := Record{
 			ID:                d.ID,
 			Name:              d.Name,
 			Hostname:          d.Hostname,
@@ -117,7 +237,14 @@ func FromInventory(inv inventory.Inventory, now time.Time) Baseline {
 			External:          d.External,
 			AdvertisedRoutes:  d.AdvertisedRoutes,
 			ExitNode:          d.ExitNode(),
-		})
+		}
+		// The local source cannot see whether a peer runs Tailscale SSH, so
+		// it records nothing rather than a misleading "off".
+		if inv.Source == inventory.SourceAPI {
+			ssh := d.SSHEnabled
+			rec.SSHEnabled = &ssh
+		}
+		b.Devices = append(b.Devices, rec)
 	}
 	sort.Slice(b.Devices, func(i, j int) bool { return b.Devices[i].ID < b.Devices[j].ID })
 	b.index()

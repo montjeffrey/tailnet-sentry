@@ -12,6 +12,9 @@
 //     operator accepted when baselining is not reported again; something
 //     not accepted keeps being reported on every scan until it is fixed,
 //     isolated, or accepted with `sentry baseline --accept`.
+//   - Control rules (policy, auth keys, DNS, users; control.go) look at the
+//     tailnet's configuration rather than at a device. Most are drift
+//     rules; policy-permissive is a hygiene rule.
 //   - Hygiene rules (key expired or expiring, outdated client, update
 //     available, stale, cloned node key) fire on the current state
 //     whatever the baseline says, because time alone makes them true.
@@ -109,9 +112,11 @@ func All() []Rule {
 		{"unexpected-owner", High, "owner is not an expected user, or changed", UnexpectedOwner},
 		{"identity-changed", High, "a known device ID now reports a different OS or addresses", IdentityChanged},
 		{"multiple-connections", High, "several machines are using the same node key", MultipleConnections},
+		{"tailnet-lock-unsigned", High, "tailnet lock is on and the node is not validly signed", TailnetLockUnsigned},
 		{"unexpected-tags", High, "device carries tags it did not have", UnexpectedTags},
 		{"unexpected-routes", High, "device advertises subnet routes it did not have", UnexpectedRoutes},
 		{"exit-node", High, "device newly offers itself as an exit node", ExitNode},
+		{"ssh-enabled", Medium, "device newly runs Tailscale SSH", SSHEnabled},
 		{"key-expired", High, "node key has expired", KeyExpired},
 		{"key-expiry-disabled", Medium, "node key was set never to expire", KeyExpiryDisabled},
 		{"key-expiring", Medium, "node key expires soon", KeyExpiring},
@@ -122,7 +127,9 @@ func All() []Rule {
 	}
 }
 
-// Evaluate runs every enabled rule on every device except quarantined ones.
+// Evaluate runs every enabled rule on every device except quarantined ones,
+// then every enabled control rule on the tailnet's configuration, when the
+// inventory has one. Control findings have an empty DeviceID.
 func Evaluate(inv inventory.Inventory, base *baseline.Baseline, cfg Config, now time.Time) []Finding {
 	env := NewEnv(cfg, base, now)
 	disabled := map[string]bool{}
@@ -145,6 +152,17 @@ func Evaluate(inv inventory.Inventory, base *baseline.Baseline, cfg Config, now 
 			for _, detail := range r.Check(env, d, known) {
 				out = append(out, Finding{Rule: r.ID, Severity: r.Severity, DeviceID: d.ID, Device: d.ShortName(), Detail: detail})
 			}
+		}
+	}
+	if inv.Control == nil {
+		return out
+	}
+	for _, r := range AllControl() {
+		if disabled[r.ID] {
+			continue
+		}
+		for _, detail := range r.Check(env, inv.Control, base) {
+			out = append(out, Finding{Rule: r.ID, Severity: r.Severity, Device: TailnetDevice, Detail: detail})
 		}
 	}
 	return out
@@ -337,6 +355,30 @@ func Stale(env Env, d inventory.Device, _ *baseline.Record) []string {
 	return []string{fmt.Sprintf("last seen %s ago (%s)", humanDays(age), d.LastSeen.UTC().Format(time.DateOnly))}
 }
 
+// SSHEnabled fires when a device runs Tailscale SSH and did not in the
+// baseline, or is new. With it on, the policy's ssh rules can grant shell
+// access to the device over the tailnet, a lateral-movement path that
+// needs no credential on the device itself. A baseline that predates this
+// field is unknown, not "was off", and stays quiet.
+func SSHEnabled(_ Env, d inventory.Device, known *baseline.Record) []string {
+	if !d.SSHEnabled || (known != nil && (known.SSHEnabled == nil || *known.SSHEnabled)) {
+		return nil
+	}
+	return []string{"Tailscale SSH is enabled"}
+}
+
+// TailnetLockUnsigned fires whenever Tailscale reports a tailnet lock error
+// for the device: lock is on and its node key is not signed by a trusted
+// lock key, which is what an attacker who added a node through the control
+// plane, bypassing the signing nodes, would leave behind. It is not a drift
+// rule; an accepted unsigned node is still unsigned.
+func TailnetLockUnsigned(_ Env, d inventory.Device, _ *baseline.Record) []string {
+	if d.TailnetLockError == "" {
+		return nil
+	}
+	return []string{"tailnet lock: " + d.TailnetLockError}
+}
+
 // UpdateAvailable fires when Tailscale says the client can be upgraded.
 func UpdateAvailable(_ Env, d inventory.Device, _ *baseline.Record) []string {
 	if !d.UpdateAvailable {
@@ -380,16 +422,23 @@ func rank(s Severity) int {
 	return 0
 }
 
-// Sort orders findings by severity, then device, then rule order.
+// Sort orders findings by severity, then tailnet before devices, then
+// device, then rule order.
 func Sort(fs []Finding) {
 	order := map[string]int{}
 	for i, r := range All() {
 		order[r.ID] = i
 	}
+	for i, r := range AllControl() {
+		order[r.ID] = len(order) + i
+	}
 	sort.SliceStable(fs, func(i, j int) bool {
 		a, b := fs[i], fs[j]
 		if rank(a.Severity) != rank(b.Severity) {
 			return rank(a.Severity) > rank(b.Severity)
+		}
+		if (a.DeviceID == "") != (b.DeviceID == "") {
+			return a.DeviceID == ""
 		}
 		if a.Device != b.Device {
 			return a.Device < b.Device

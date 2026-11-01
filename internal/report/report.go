@@ -44,6 +44,9 @@ type Summary struct {
 	Notice      int `json:"notice"`
 	Quarantined int `json:"quarantined"`
 	Findings    int `json:"findings"`
+	// Tailnet counts findings about the tailnet's configuration (policy,
+	// keys, DNS, users) rather than about one device.
+	Tailnet int `json:"tailnet"`
 }
 
 // BaselineInfo describes the baseline a scan was compared with.
@@ -71,6 +74,10 @@ type Report struct {
 	Summary  Summary         `json:"summary"`
 	Devices  []DeviceStatus  `json:"devices"`
 	Findings []rules.Finding `json:"findings"`
+	// Unread names the control-plane sections (policy, keys, dns, users)
+	// the credential could not read, whose rules did not run. A collector
+	// that sees a section appear here can tell the credential was narrowed.
+	Unread []string `json:"unread,omitempty"`
 }
 
 // DegradedNote is printed with every report and baseline from the local
@@ -114,6 +121,11 @@ func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Fi
 	}
 	r.Summary.Devices = len(r.Devices)
 	r.Summary.Findings = len(findings)
+	for _, f := range findings {
+		if f.DeviceID == "" {
+			r.Summary.Tailnet++
+		}
+	}
 	return r
 }
 
@@ -174,6 +186,13 @@ func (r Report) WriteTable(w io.Writer) error {
 		line += fmt.Sprintf(", %d quarantined", s.Quarantined)
 	}
 	fmt.Fprintln(w, line+".")
+	if s.Tailnet > 0 {
+		fmt.Fprintf(w, "Tailnet configuration: %d %s (policy, keys, DNS or users); isolating a device will not undo these.\n",
+			s.Tailnet, plural(s.Tailnet, "finding", "findings"))
+	}
+	if len(r.Unread) > 0 {
+		fmt.Fprintf(w, "Not checked (the credential cannot read them): %s.\n", strings.Join(r.Unread, ", "))
+	}
 	for _, d := range r.Devices {
 		if d.Status == StatusAnomaly && d.Severity == rules.High {
 			fmt.Fprintf(w, "Contain %s with: sentry isolate %s   (dry run; add --apply to act)\n", Clean(d.Name), Clean(d.ID))

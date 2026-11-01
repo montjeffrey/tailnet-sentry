@@ -80,6 +80,108 @@ func TestAttackScenarios(t *testing.T) {
 			d["tags"] = []string{"tag:quarantine", "tag:server"}
 			h.api.add(d)
 		}, []string{"new-device"}},
+
+		// Device fields that change what an admin login can reach.
+		{"Tailscale SSH switched on as a lateral-movement path", func(h *harness) {
+			h.api.set(func(f *fakeAPI) { f.devices[0]["sshEnabled"] = true })
+		}, []string{"ssh-enabled"}},
+		{"node added past tailnet lock, unsigned", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.devices[1]["tailnetLockError"] = "node key is not signed by a trusted tailnet lock key"
+			})
+		}, []string{"tailnet-lock-unsigned"}},
+
+		// Control-plane changes: no device changes at all.
+		{"policy edited to grant a new path", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = strings.Replace(healthyPolicy, `"dst": ["autogroup:member", "tag:server"]`,
+					`"dst": ["autogroup:member", "tag:server", "192.168.1.0/24"]`, 1)
+			})
+		}, []string{"policy-changed"}},
+		{"policy reset to allow-all, defeating quarantine", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"acls": [{"action": "accept", "src": ["*"], "dst": ["*:*"]}]}`
+			})
+		}, []string{"policy-changed", "policy-permissive"}},
+		{"policy grants autogroup:tagged, which every quarantined device is in", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = strings.Replace(healthyPolicy, `"grants": [`,
+					`"grants": [{"src": ["autogroup:tagged"], "dst": ["tag:server"], "ip": ["22"]}, `, 1)
+			})
+		}, []string{"policy-changed", "policy-permissive"}},
+		{"evasion: permissive rule under a duplicate, differently cased ACLs key", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"ACLs": [{"action": "accept", "src": ["*"], "dst": ["*:*"]}],
+				             "acls": [{"action": "accept", "src": ["autogroup:member"], "dst": ["autogroup:member:*"]}]}`
+			})
+		}, []string{"policy-permissive"}},
+		{"reusable auth key minted for later enrolment", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kROGUE", "keyType": "auth", "created": "2026-10-12T11:00:00Z",
+					"expires": "2026-10-13T11:00:00Z", "capabilities": map[string]any{"devices": map[string]any{
+						"create": map[string]any{"reusable": true, "preauthorized": true}}}})
+			})
+		}, []string{"auth-key-risky"}},
+		{"single-use auth key valid for 90 days", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kLONG", "keyType": "auth", "created": "2026-10-12T11:00:00Z",
+					"expires": "2027-01-10T11:00:00Z", "capabilities": map[string]any{"devices": map[string]any{
+						"create": map[string]any{"reusable": false}}}})
+			})
+		}, []string{"auth-key-risky"}},
+		{"API access token minted for persistence", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kAPITOKEN", "keyType": "api", "created": "2026-10-12T11:00:00Z",
+					"expires": "2027-01-10T11:00:00Z"})
+			})
+		}, []string{"credential-new"}},
+		{"OAuth client created for persistence", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.keys = append(f.keys, apiDev{"id": "kCLIENT", "keyType": "client", "created": "2026-10-12T11:00:00Z"})
+			})
+		}, []string{"credential-new"}},
+		{"sentry's DNS scope revoked before a DNS hijack", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.deny = map[string]bool{"/tailnet/-/dns/nameservers": true, "/tailnet/-/dns/split-dns": true}
+				f.nameservers = []string{"203.0.113.53"}
+			})
+		}, []string{"control-unreadable"}},
+		{"sentry's policy scope revoked before the policy is opened up", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.deny = map[string]bool{"/tailnet/-/acl": true}
+				f.policy = `{"grants":[{"src":["*"],"dst":["*"],"ip":["*"]}]}`
+			})
+		}, []string{"control-unreadable"}},
+		{"policy opened to tagged devices through an ssh rule", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"acls":[{"action":"accept","src":["autogroup:member"],"dst":["autogroup:member:*"]}],
+				             "ssh":[{"action":"accept","src":["autogroup:tagged"],"dst":["autogroup:self"],"users":["root"]}]}`
+			})
+		}, []string{"policy-permissive"}},
+		{"policy opened to half the tailnet by address range", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.policy = `{"acls":[{"action":"accept","src":["100.64.0.0-100.95.255.255"],"dst":["*:*"]}]}`
+			})
+		}, []string{"policy-permissive"}},
+		{"policy access sections deleted, falling back to allow-all", func(h *harness) {
+			h.api.set(func(f *fakeAPI) { f.policy = `{"tagOwners":{"tag:quarantine":["autogroup:admin"]}}` })
+		}, []string{"policy-permissive"}},
+		{"global nameserver swapped for DNS hijack", func(h *harness) {
+			h.api.set(func(f *fakeAPI) { f.nameservers = []string{"203.0.113.53"} })
+		}, []string{"dns-changed"}},
+		{"split DNS added to capture one domain", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.splitDNS = map[string][]string{"corp.example": {"192.168.1.53"}, "github.com": {"203.0.113.53"}}
+			})
+		}, []string{"dns-changed"}},
+		{"new admin user added", func(h *harness) {
+			h.api.set(func(f *fakeAPI) {
+				f.users = append(f.users, apiDev{"id": "u9", "loginName": "mallory@example.com", "role": "admin", "type": "member"})
+			})
+		}, []string{"new-user"}},
+		{"existing member promoted to admin", func(h *harness) {
+			h.api.set(func(f *fakeAPI) { f.users[1]["role"] = "admin" })
+		}, []string{"user-role-changed"}},
 	}
 
 	for _, tc := range tests {

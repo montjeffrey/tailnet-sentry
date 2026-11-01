@@ -123,3 +123,30 @@ func TestHeadline(t *testing.T) {
 		t.Errorf("Headline = %q", got)
 	}
 }
+
+func TestTailnetFindingsAreCountedApart(t *testing.T) {
+	inv := inventory.Inventory{Source: inventory.SourceAPI, Devices: []inventory.Device{{ID: "nDESK", Name: "desktop.example.ts.net"}}}
+	findings := []rules.Finding{{Rule: "policy-changed", Severity: rules.High, Device: rules.TailnetDevice, Detail: "policy file changed"}}
+	r := Build(inv, nil, findings, "t", now)
+	r.Unread = []string{"users"}
+	if r.Summary.Tailnet != 1 || r.Summary.Healthy != 1 || r.Summary.Anomalous != 0 {
+		t.Errorf("summary = %+v", r.Summary)
+	}
+	var buf bytes.Buffer
+	if err := r.WriteTable(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"high  tailnet  policy-changed", "Tailnet configuration: 1 finding",
+		"Not checked (the credential cannot read them): users."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "sentry isolate") {
+		t.Errorf("a tailnet finding must not suggest isolating a device:\n%s", out)
+	}
+	if got := r.Headline(); got != "tailnet-sentry: 1 finding on tailnet (policy-changed)" {
+		t.Errorf("Headline = %q", got)
+	}
+}

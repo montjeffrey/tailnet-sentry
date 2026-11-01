@@ -211,3 +211,65 @@ func TestLoadRefusesOversizedFile(t *testing.T) {
 		t.Errorf("Load error = %v", err)
 	}
 }
+
+// A baseline sealed or pinned before sentry recorded the control plane or
+// sshEnabled must hash the same now, so its seal and any pin still hold.
+// Both are omitted when absent, which this checks byte for byte.
+func TestNewFieldsDoNotChangeOldDigests(t *testing.T) {
+	old := Baseline{Version: FormatVersion, CreatedAt: now, Source: inventory.SourceAPI,
+		Devices: []Record{{ID: "nA", Name: "laptop", Owner: "alice@github", OS: "windows", Addresses: []string{"100.64.0.2"}}}}
+	data, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"control", "sshEnabled"} {
+		if strings.Contains(string(data), `"`+field+`"`) {
+			t.Errorf("an old baseline now serialises %q, which changes its digest: %s", field, data)
+		}
+	}
+}
+
+func TestControlRoundTripAndTake(t *testing.T) {
+	keys := []inventory.AuthKey{{ID: "kB"}, {ID: "kA"}}
+	users := []inventory.User{{ID: "u2", LoginName: "bob@github", Role: "member"}, {ID: "u1", LoginName: "alice@github", Role: "owner"}}
+	inv := sampleInventory()
+	inv.Devices[0].SSHEnabled = true
+	inv.Control = &inventory.Control{Policy: &inventory.Policy{SHA256: "abc"}, AuthKeys: &keys, Users: &users} // DNS unreadable
+	path := filepath.Join(t.TempDir(), "baseline.json")
+	if err := Save(path, FromInventory(inv, now), false); err != nil {
+		t.Fatal(err)
+	}
+	b, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := b.Control
+	if !c.Has(SectionPolicy) || c.Policy.SHA256 != "abc" || c.Has(SectionDNS) {
+		t.Fatalf("control = %+v", c)
+	}
+	if strings.Join(*c.AuthKeys, ",") != "kA,kB" || len(*c.Users) != 2 || (*c.Users)[0].ID != "u1" {
+		t.Errorf("keys %v users %+v", *c.AuthKeys, *c.Users)
+	}
+	if nas := b.Lookup("nB"); nas.SSHEnabled == nil || !*nas.SSHEnabled {
+		t.Errorf("sshEnabled not recorded: %+v", nas)
+	}
+	// An empty key list is known-empty, not unknown.
+	none := []inventory.AuthKey{}
+	if !c.Take(&inventory.Control{AuthKeys: &none}, SectionAuthKeys) || !c.Has(SectionAuthKeys) || len(*c.AuthKeys) != 0 {
+		t.Errorf("empty key list: %+v", c.AuthKeys)
+	}
+	if c.Take(&inventory.Control{}, SectionDNS) || c.Take(inv.Control, "routes") {
+		t.Error("Take must refuse an unreadable or unknown section")
+	}
+	var nilControl *Control
+	if nilControl.Has(SectionPolicy) {
+		t.Error("a nil Control has nothing")
+	}
+	// The local source cannot see sshEnabled, so it records nothing.
+	local := sampleInventory()
+	local.Source = inventory.SourceLocal
+	lb := FromInventory(local, now)
+	if r := lb.Lookup("nB"); r.SSHEnabled != nil {
+		t.Errorf("local baseline recorded sshEnabled: %+v", r)
+	}
+}

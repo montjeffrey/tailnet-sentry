@@ -111,7 +111,7 @@ func TestListDevicesMapsEveryField(t *testing.T) {
 	nas := inv.Devices[byID["nNASCNTRL"]]
 	if nas.Owner != "alice@github" || nas.OS != "linux" || !nas.KeyExpiryDisabled ||
 		len(nas.Tags) != 1 || nas.Tags[0] != "tag:server" ||
-		len(nas.AdvertisedRoutes) != 1 || nas.AdvertisedRoutes[0] != "192.168.1.0/24" || !nas.Online {
+		len(nas.AdvertisedRoutes) != 1 || nas.AdvertisedRoutes[0] != "192.168.1.0/24" || !nas.Online || !nas.SSHEnabled || nas.TailnetLockError != "" {
 		t.Errorf("nas mapped wrongly: %+v", nas)
 	}
 	laptop := inv.Devices[byID["nLAPTOPCNTRL"]]
@@ -120,7 +120,7 @@ func TestListDevicesMapsEveryField(t *testing.T) {
 		t.Errorf("laptop mapped wrongly: %+v", laptop)
 	}
 	shared := inv.Devices[byID["nSHAREDCNTRL"]]
-	if !shared.External || !shared.MultipleConnections {
+	if !shared.External || !shared.MultipleConnections || shared.TailnetLockError != "node is not signed" || shared.SSHEnabled {
 		t.Errorf("external device mapped wrongly: %+v", shared)
 	}
 	// Sorted by short name for stable output.
