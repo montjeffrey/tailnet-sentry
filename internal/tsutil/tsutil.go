@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -223,13 +222,9 @@ func binary() (string, error) {
 var trustedPaths = func() []string {
 	switch runtime.GOOS {
 	case "windows":
-		var out []string
-		// An unset ProgramFiles would make this path relative, and run
-		// whatever tailscale.exe sits in the current directory.
-		if pf := os.Getenv("ProgramFiles"); filepath.IsAbs(pf) {
-			out = append(out, filepath.Join(pf, "Tailscale", "tailscale.exe"))
-		}
-		return append(out, `C:\Program Files\Tailscale\tailscale.exe`)
+		// Fixed rather than read from %ProgramFiles%, which whoever starts
+		// sentry controls; on Windows this is the only path checked trusts.
+		return []string{`C:\Program Files\Tailscale\tailscale.exe`}
 	case "darwin":
 		return []string{"/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"}
 	default:
