@@ -42,8 +42,10 @@ redirects are refused.
   gets a short fixed allowlist of variables (PATH, home and temp
   directories, locale), so nothing else in sentry's environment, such as a
   webhook URL, reaches it either. The CLI is looked up in Tailscale's
-  install locations before `PATH`, and on Unix a copy that other users
-  could replace is refused.
+  install locations before `PATH`. On Unix a copy that anyone but root or
+  the current user could replace (the file, its directories, or a symlink
+  target's directories) is refused; on Windows only the install location
+  is trusted.
 - OAuth clients are exchanged for a token scoped to the command:
   `devices:core:read` for scan and baseline, and `devices:core` only for
   `isolate --apply` and `release --apply`. The token lives in memory only.

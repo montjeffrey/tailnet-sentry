@@ -66,8 +66,10 @@ function Send-Alert([string]$message) {
 # becomes a terminating error, so a failed scan would kill this script before
 # it could raise the alert. sentry reads SENTRY_WEBHOOK (if set as a user
 # variable) itself, so that URL, which embeds its own secret, never appears
-# on the task's command line.
-$p = Start-Process -FilePath $sentry -ArgumentList 'scan', '--json' -NoNewWindow -Wait -PassThru `
+# on the task's command line. --source api makes a missing credential an
+# error (exit 2) instead of a quiet fall back to the local source's partial
+# view.
+$p = Start-Process -FilePath $sentry -ArgumentList 'scan', '--source', 'api', '--json' -NoNewWindow -Wait -PassThru `
     -RedirectStandardOutput $out -RedirectStandardError $err
 $code = $p.ExitCode
 
