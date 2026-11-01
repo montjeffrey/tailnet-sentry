@@ -36,10 +36,19 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Pinned so a release is built by a known compiler; keep it equal
-          # to the toolchain line in go.mod.
-          go-version: '1.27.2'
-          cache: true
+          # A release is built by the compiler go.mod pins, checked below.
+          # No cache: a release must not reuse build output from any other run.
+          go-version-file: go.mod
+          cache: false
+
+      # Fail if the compiler in use is not the toolchain go.mod pins: a
+      # mismatch means CI tested, or a release shipped, a different Go.
+      - name: Go matches go.mod
+        shell: bash
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go env GOVERSION)
+          [ "$got" = "$want" ] || { echo "::error::building with $got, but go.mod pins $want"; exit 1; }
 
       # Never ship what has not passed: the tagged commit is tested again here.
       - name: test the tagged commit
