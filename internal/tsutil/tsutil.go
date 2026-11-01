@@ -204,8 +204,8 @@ func run(ctx context.Context, args ...string) ([]byte, error) {
 // binary finds the tailscale CLI. Tailscale's own install locations come
 // first, so a writable directory early in PATH (common under schedulers and
 // service managers) cannot put another program in its place. PATH is only
-// the fallback for installs elsewhere, and on Unix a candidate that anyone
-// but its owner could replace is refused wherever it was found.
+// the fallback for installs elsewhere, and checked (one per platform) refuses
+// a candidate that someone else could replace, wherever it was found.
 func binary() (string, error) {
 	for _, p := range trustedPaths() {
 		if _, err := os.Stat(p); err == nil {
@@ -235,23 +235,4 @@ var trustedPaths = func() []string {
 	default:
 		return []string{"/usr/bin/tailscale", "/usr/sbin/tailscale", "/usr/local/bin/tailscale", "/snap/bin/tailscale"}
 	}
-}
-
-// checked returns p unless, on Unix, the file or its directory is writable
-// by group or others. Windows permissions are ACLs that mode bits do not
-// describe, so there the trusted-locations-first order is the protection.
-func checked(p string) (string, error) {
-	if runtime.GOOS == "windows" {
-		return p, nil
-	}
-	for _, q := range []string{p, filepath.Dir(p)} {
-		fi, err := os.Stat(q)
-		if err != nil {
-			return "", fmt.Errorf("tailscale CLI %s: %w", p, err)
-		}
-		if fi.Mode().Perm()&0o022 != 0 {
-			return "", fmt.Errorf("refusing to run the tailscale CLI at %s: %s is writable by other users", p, q)
-		}
-	}
-	return p, nil
 }
