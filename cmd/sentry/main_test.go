@@ -882,6 +882,29 @@ func TestControlReadFailureKeepsDeviceFindings(t *testing.T) {
 	if code, _, errOut := h.run("baseline", "--force"); code != exitError || !strings.Contains(errOut, "cannot read the policy file") {
 		t.Errorf("baseline past a failed read: exit %d %s", code, errOut)
 	}
+	// A failure in one section does not block accepting another.
+	h.api.set(func(f *fakeAPI) { f.nameservers = []string{"9.9.9.9"} })
+	if code, out, errOut := h.run("baseline", "--accept-control", "dns"); code != exitClean {
+		t.Errorf("accept dns while the policy read fails: exit %d\n%s%s", code, out, errOut)
+	}
+}
+
+// Re-recording the baseline with a credential that has lost a scope would
+// drop that section, and with it the only rule that notices the loss.
+func TestForcedBaselineKeepsWatchedSections(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.set(func(f *fakeAPI) { f.deny = map[string]bool{"/tailnet/-/users": true} })
+	code, _, errOut := h.run("baseline", "--force")
+	if code != exitError || !strings.Contains(errOut, "the existing baseline records the user list but this credential cannot read it") {
+		t.Fatalf("exit %d %s", code, errOut)
+	}
+	if err := os.Remove(h.baselineFile()); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := h.run("baseline"); code != exitClean || !strings.Contains(out, "not recorded  users") {
+		t.Errorf("a fresh baseline without the scope: exit %d\n%s%s", code, out, errOut)
+	}
 }
 
 func TestAcceptControlClearsOneSection(t *testing.T) {

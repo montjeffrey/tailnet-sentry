@@ -308,9 +308,13 @@ func collectControl(ctx context.Context, c *common, d deps) (*inventory.Control,
 		if err == nil {
 			continue
 		}
+		// An interrupted scan did not run, which is exit 2, not a finding.
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
 		why := "the credential lacks " + string(s.scope)
 		if !tsapi.ScopeDenied(err) {
-			why = readFailed + err.Error()
+			why = readFailed + report.Clean(err.Error())
 		}
 		skipped := s.rules
 		if s.name == baseline.SectionPolicy {
@@ -324,6 +328,33 @@ func collectControl(ctx context.Context, c *common, d deps) (*inventory.Control,
 		unread = append(unread, s.name)
 	}
 	return ctl, unread, nil
+}
+
+// checkControlComplete stops a full baseline from quietly losing a section.
+// Recording past a failed read would leave it out for no reason the operator
+// chose, and re-recording with a credential that has since lost a scope would
+// drop a section the existing baseline watches: after that no rule could
+// notice the scope was gone.
+func checkControlComplete(c *common, inv inventory.Inventory) error {
+	if inv.Control == nil {
+		return nil
+	}
+	old, oldErr := baseline.LoadUnverified(c.baselinePath())
+	for _, s := range controlSections {
+		why, unread := inv.Control.Unread[s.name]
+		if !unread {
+			continue
+		}
+		if strings.HasPrefix(why, readFailed) {
+			return fmt.Errorf("cannot read the %s: %s", s.what, strings.TrimPrefix(why, readFailed))
+		}
+		if oldErr == nil && old.Control.Has(s.name) {
+			return fmt.Errorf("the existing baseline records the %s but this credential cannot read it (%s), so a new "+
+				"baseline would stop watching it. Restore the scope, or remove %s first if you mean to stop",
+				s.what, why, c.baselinePath())
+		}
+	}
+	return nil
 }
 
 // noteSSHGaps says when ssh-enabled cannot judge some devices: records from
@@ -499,15 +530,6 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if err != nil {
 		return err
 	}
-	// Recording known-good state past a failed read would leave that section
-	// out of the baseline for no reason the operator chose.
-	if inv.Control != nil {
-		for _, s := range controlSections {
-			if why := inv.Control.Unread[s.name]; strings.HasPrefix(why, readFailed) {
-				return fmt.Errorf("cannot read the %s: %s", s.what, strings.TrimPrefix(why, readFailed))
-			}
-		}
-	}
 	// A baseline is what later scans call healthy. One recorded from the
 	// local source silently leaves out devices this machine cannot see, so
 	// it takes an explicit opt-in (with --source auto it is otherwise what
@@ -522,6 +544,9 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	if *acceptControl != "" {
 		return acceptControlSections(&c, inv, *acceptControl, d)
+	}
+	if err := checkControlComplete(&c, inv); err != nil {
+		return err
 	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
