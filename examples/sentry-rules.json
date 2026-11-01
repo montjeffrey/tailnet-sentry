@@ -4,6 +4,6 @@
   "allowedRoutes": [],
   "expiryWarnDays": 14,
   "staleDays": 30,
-  "minClientVersion": "1.90.0",
+  "minClientVersion": "1.104.2",
   "disabled": []
 }

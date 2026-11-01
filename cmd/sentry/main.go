@@ -228,8 +228,19 @@ func collect(ctx context.Context, c *common, d deps) (inventory.Inventory, error
 		}
 		return client.ListDevices(ctx)
 	case inventory.SourceLocal:
-		inv, _, err := d.local(ctx)
-		return inv, err
+		inv, self, err := d.local(ctx)
+		if err != nil {
+			return inventory.Inventory{}, err
+		}
+		// Everything the local source reports comes from this tailscaled. One
+		// older than the security floor is exposed to the issues that floor
+		// fixes, so its view of the tailnet is not evidence of anything.
+		if older, ok := rules.OlderThan(self.Version, rules.MinSafeVersion); older || !ok {
+			return inventory.Inventory{}, fmt.Errorf("the local tailscaled is version %q, which is older than %s or unreadable, "+
+				"so its view of the tailnet cannot be trusted. Update Tailscale on this machine, or scan with --source api",
+				self.Version, rules.MinSafeVersion)
+		}
+		return inv, nil
 	}
 	return inventory.Inventory{}, fmt.Errorf("--source must be api, local or auto, not %q", c.source)
 }
@@ -253,7 +264,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 		"POST the report here when there are findings: https, or http to localhost (env SENTRY_WEBHOOK)")
 	expiryDays := fs.Int("expiry-days", 14, "flag keys expiring within N days (overrides the rules file)")
 	staleDays := fs.Int("stale-days", 30, "flag devices not seen for N days, 0 to disable (overrides the rules file)")
-	minVersion := fs.String("min-version", "", "flag Tailscale clients older than this version, e.g. 1.80.0")
+	minVersion := fs.String("min-version", "", "flag Tailscale clients older than this version (overrides the rules file; default "+rules.MinSafeVersion+")")
 	failOnFlag := fs.String("fail-on", "medium", "lowest severity that exits 1 and sends the webhook: low, medium or high")
 	// The pin is only worth something if it lives where whoever can edit the
 	// state directory cannot reach: the scheduler's own configuration, say.
@@ -377,17 +388,17 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	if err != nil {
 		return err
 	}
-	if *accept != "" {
-		return acceptDevice(&c, inv, *accept, d)
-	}
 	// A baseline is what later scans call healthy. One recorded from the
 	// local source silently leaves out devices this machine cannot see, so
 	// it takes an explicit opt-in (with --source auto it is otherwise what
-	// a missing credential would produce).
+	// a missing credential would produce). --accept writes the baseline too.
 	if inv.Source == inventory.SourceLocal && !*allowPartial {
 		return errors.New("the local source sees only the devices this machine's policy shows it, so a baseline " +
 			"from it can miss devices and later scans would not report them. Set API credentials for a full " +
 			"inventory, or pass --allow-partial to record a partial baseline anyway")
+	}
+	if *accept != "" {
+		return acceptDevice(&c, inv, *accept, d)
 	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {

@@ -29,6 +29,7 @@ type Self struct {
 	ID        string   // stable node ID, the same value as the API's nodeId
 	Name      string   // MagicDNS name
 	Addresses []string // Tailscale IPs
+	Version   string   // the local tailscaled's version
 }
 
 // Matches reports whether d is this device: same node ID, or any shared
@@ -110,7 +111,7 @@ func Parse(b []byte) (inventory.Inventory, Self, error) {
 		inv.Devices = append(inv.Devices, convert(p, login, false))
 	}
 	inv.Sort()
-	return inv, Self{ID: self.ID, Name: self.Name, Addresses: self.Addresses}, nil
+	return inv, Self{ID: self.ID, Name: self.Name, Addresses: self.Addresses, Version: raw.Version}, nil
 }
 
 func convert(p rawPeer, login func(int64) string, self bool) inventory.Device {

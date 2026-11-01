@@ -420,6 +420,17 @@ func parseVersion(v string) ([3]int, bool) {
 	return out, true
 }
 
+// OlderThan reports whether version have is older than minimum. ok is false
+// when either cannot be read as a version.
+func OlderThan(have, minimum string) (older, ok bool) {
+	h, okH := parseVersion(have)
+	m, okM := parseVersion(minimum)
+	if !okH || !okM {
+		return false, false
+	}
+	return versionLess(h, m), true
+}
+
 func versionLess(a, b [3]int) bool {
 	for i := range a {
 		if a[i] != b[i] {
