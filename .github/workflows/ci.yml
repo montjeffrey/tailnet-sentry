@@ -21,8 +21,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: true
+
+      # Fail if the compiler in use is not the toolchain go.mod pins: a
+      # mismatch means CI tested, or a release shipped, a different Go.
+      - name: Go matches go.mod
+        shell: bash
+        run: |
+          want=$(awk '$1 == "toolchain" {print $2}' go.mod)
+          got=$(go env GOVERSION)
+          [ "$got" = "$want" ] || { echo "::error::building with $got, but go.mod pins $want"; exit 1; }
 
       - name: gofmt
         if: runner.os == 'Linux'
@@ -41,7 +50,7 @@ jobs:
     steps:
       - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
         with:
-          go-version-input: stable
+          go-version-file: go.mod
 
   # Every commit, not just the tip: a secret removed later is still in history.
   # gitleaks is built from source at a pinned version, so Go's checksum
