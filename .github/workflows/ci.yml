@@ -48,9 +48,17 @@ jobs:
   vulncheck:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The action passes go-version-input (default "stable") alongside any
+      # go-version-file, and setup-go then ignores the file, so the version
+      # go.mod pins is handed over explicitly.
+      - name: toolchain from go.mod
+        id: go
+        run: echo "version=$(awk '$1 == "toolchain" {sub(/^go/, "", $2); print $2}' go.mod)" >> "$GITHUB_OUTPUT"
       - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
         with:
-          go-version-file: go.mod
+          go-version-input: ${{ steps.go.outputs.version }}
+          repo-checkout: false
 
   # Every commit, not just the tip: a secret removed later is still in history.
   # gitleaks is built from source at a pinned version, so Go's checksum

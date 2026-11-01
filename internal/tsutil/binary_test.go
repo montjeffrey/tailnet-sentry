@@ -114,6 +114,31 @@ func TestBinaryRefusesSymlinkIntoWritableDir(t *testing.T) {
 	}
 }
 
+// Every hop of a symlink chain is checked, not just its two ends: a middle
+// link in a directory others can write could be repointed after the check.
+func TestBinaryRefusesWritableMiddleHop(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows trusts only the install location")
+	}
+	target := writeFakeTailscale(t, t.TempDir(), "nANY")
+	writable := t.TempDir()
+	middle := filepath.Join(writable, "tailscale")
+	if err := os.Symlink(target, middle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(writable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "tailscale")
+	if err := os.Symlink(middle, link); err != nil {
+		t.Fatal(err)
+	}
+	useTrusted(t, link)
+	if _, err := binary(); err == nil || !strings.Contains(err.Error(), "writable by other users") {
+		t.Fatalf("binary() err = %v, want a refusal", err)
+	}
+}
+
 // On Windows mode bits say nothing, so only the install location is
 // trusted: a tailscale.exe found on PATH is refused.
 func TestBinaryRefusesPathOnWindows(t *testing.T) {
