@@ -33,17 +33,17 @@ type apiDev map[string]any
 func healthyDevices() []apiDev {
 	return []apiDev{
 		{"nodeId": "nDESKTOPCNTRL", "id": "1", "user": "alice@github", "name": "desktop.example.ts.net", "hostname": "DESKTOP",
-			"os": "windows", "addresses": []string{"100.64.0.1"}, "clientVersion": "1.102.2", "connectedToControl": true,
+			"os": "windows", "addresses": []string{"100.64.0.1"}, "clientVersion": "1.104.2", "connectedToControl": true,
 			"expires": "2027-06-01T00:00:00Z", "authorized": true, "tags": []string{}},
 		{"nodeId": "nNASCNTRL", "id": "2", "user": "alice@github", "name": "nas.example.ts.net", "hostname": "nas",
-			"os": "linux", "addresses": []string{"100.64.0.3"}, "clientVersion": "1.102.2", "connectedToControl": true,
+			"os": "linux", "addresses": []string{"100.64.0.3"}, "clientVersion": "1.104.2", "connectedToControl": true,
 			"keyExpiryDisabled": true, "authorized": true, "tags": []string{"tag:server"}, "advertisedRoutes": []string{"192.168.1.0/24"}},
 	}
 }
 
 func intruder() apiDev {
 	return apiDev{"nodeId": "nKALICNTRL", "id": "3", "user": "mallory@example.com", "name": "kali.example.ts.net", "hostname": "kali",
-		"os": "linux", "addresses": []string{"100.64.0.66"}, "clientVersion": "1.102.2", "connectedToControl": true,
+		"os": "linux", "addresses": []string{"100.64.0.66"}, "clientVersion": "1.104.2", "connectedToControl": true,
 		"expires": "2027-06-01T00:00:00Z", "authorized": true, "tags": []string{"tag:ci"}}
 }
 
@@ -140,7 +140,7 @@ func newHarness(t *testing.T) *harness {
 	t.Helper()
 	h := &harness{t: t, api: &fakeAPI{devices: healthyDevices()}, stateDir: t.TempDir(),
 		env:  map[string]string{tsapi.EnvAPIKey: testKey},
-		self: tsutil.Self{ID: "nDESKTOPCNTRL", Addresses: []string{"100.64.0.1"}}}
+		self: tsutil.Self{ID: "nDESKTOPCNTRL", Addresses: []string{"100.64.0.1"}, Version: "1.104.2-tabc"}}
 	h.srv = httptest.NewServer(h.api)
 	t.Cleanup(h.srv.Close)
 	return h
@@ -536,13 +536,13 @@ func TestScanFlagsClientDowngradeButNotUpgrade(t *testing.T) {
 	h := newHarness(t)
 	h.mustBaseline()
 
-	h.api.devices[0]["clientVersion"] = "1.103.0"
+	h.api.devices[0]["clientVersion"] = "1.105.0"
 	if code, out, _ := h.run("scan"); code != exitClean {
 		t.Fatalf("a routine upgrade must stay quiet: exit %d\n%s", code, out)
 	}
 	h.api.devices[0]["clientVersion"] = "1.90.0"
 	code, out, _ := h.run("scan")
-	if code != exitAnomalies || !strings.Contains(out, "client-changed") || !strings.Contains(out, "downgraded from 1.102.2 to 1.90.0") {
+	if code != exitAnomalies || !strings.Contains(out, "client-changed") || !strings.Contains(out, "downgraded from 1.104.2 to 1.90.0") {
 		t.Errorf("downgrade: exit %d\n%s", code, out)
 	}
 }

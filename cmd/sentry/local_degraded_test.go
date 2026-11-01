@@ -55,3 +55,38 @@ func TestAPIScanIsNotDegraded(t *testing.T) {
 		t.Errorf("API JSON carries degraded:\n%s", out)
 	}
 }
+
+// A tailscaled older than the security floor, or one whose version cannot be
+// read, is not trusted as a source: scan and baseline both refuse it.
+func TestLocalSourceRefusesOutdatedDaemon(t *testing.T) {
+	for _, v := range []string{"1.104.1-tabc", "1.90.0", "", "nightly"} {
+		h := newHarness(t)
+		h.env = map[string]string{}
+		if code, _, errOut := h.run("baseline", "--allow-partial"); code != exitClean {
+			t.Fatalf("baseline with a current daemon: %s", errOut)
+		}
+		h.self.Version = v
+		for _, args := range [][]string{{"baseline", "--allow-partial", "--force"}, {"scan"}} {
+			code, _, errOut := h.run(args...)
+			if code != exitError || !strings.Contains(errOut, "cannot be trusted") {
+				t.Errorf("version %q, %v: exit %d, %s", v, args, code, errOut)
+			}
+		}
+	}
+}
+
+// --accept writes the baseline, so from the local source it needs the same
+// opt-in as recording one.
+func TestLocalAcceptNeedsAllowPartial(t *testing.T) {
+	h := newHarness(t)
+	h.env = map[string]string{}
+	if code, _, errOut := h.run("baseline", "--allow-partial"); code != exitClean {
+		t.Fatalf("baseline: %s", errOut)
+	}
+	if code, _, errOut := h.run("baseline", "--accept", "desktop"); code != exitError || !strings.Contains(errOut, "--allow-partial") {
+		t.Fatalf("accept without opt-in: exit %d, %s", code, errOut)
+	}
+	if code, out, errOut := h.run("baseline", "--accept", "desktop", "--allow-partial"); code != exitClean {
+		t.Fatalf("accept with opt-in: exit %d\n%s%s", code, out, errOut)
+	}
+}

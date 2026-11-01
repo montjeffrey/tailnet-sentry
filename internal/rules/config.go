@@ -25,15 +25,21 @@ type Config struct {
 	// StaleDays flags devices not seen for this many days. 0 disables it.
 	StaleDays int `json:"staleDays"`
 	// MinClientVersion flags clients older than this, e.g. "1.80.0".
-	// Empty disables the check (update-available still applies).
-	MinClientVersion string `json:"minClientVersion,omitempty"`
+	// It defaults to MinSafeVersion; an explicit "" disables the check
+	// (update-available still applies).
+	MinClientVersion string `json:"minClientVersion"`
 	// Disabled lists rule IDs to skip entirely.
 	Disabled []string `json:"disabled,omitempty"`
 }
 
+// MinSafeVersion is the oldest Tailscale release that carries the October
+// 2026 security fixes. It is the default for MinClientVersion, and the local
+// source refuses a tailscaled older than it.
+const MinSafeVersion = "1.104.2"
+
 // DefaultConfig is used when no config file is given.
 func DefaultConfig() Config {
-	return Config{ExpiryWarnDays: 14, StaleDays: 30}
+	return Config{ExpiryWarnDays: 14, StaleDays: 30, MinClientVersion: MinSafeVersion}
 }
 
 // LoadConfig reads a JSON config. Unknown fields are an error, so a typo

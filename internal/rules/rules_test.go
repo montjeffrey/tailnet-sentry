@@ -207,7 +207,8 @@ func TestKeyExpiring(t *testing.T) {
 func TestClientOutdated(t *testing.T) {
 	min := func(v string) Env { return env(func(c *Config) { c.MinClientVersion = v }) }
 	runCases(t, ClientOutdated, []ruleCase{
-		{name: "no minimum set"},
+		{name: "default floor", want: "client 1.102.2 is older than " + MinSafeVersion},
+		{name: "check disabled", env: min("")},
 		{name: "newer", env: min("1.80.0")},
 		{name: "equal", env: min("1.102.2")},
 		{name: "older", env: min("1.104.0"), want: "client 1.102.2 is older than 1.104.0"},
@@ -262,6 +263,7 @@ func TestUpdateAvailable(t *testing.T) {
 
 func TestEvaluateFlagsOnlyTheAnomaly(t *testing.T) {
 	healthy := laptop()
+	healthy.ClientVersion = MinSafeVersion // current, so only the intruder is flagged
 	intruder := inventory.Device{ID: "nKALI", Name: "kali.example.ts.net", Owner: "mallory@example.com", OS: "linux",
 		Addresses: []string{"100.64.0.66"}, Authorized: true, Online: true, Expires: now.Add(days(180))}
 	quarantined := intruder
