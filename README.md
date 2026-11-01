@@ -56,8 +56,10 @@ they are configured.
      It needs a credential (see [Token scopes](#token-scopes)).
    - **`local`**: `tailscale status --json`. It needs no credential and is read-only, but it only
      sees the peers this device's policy lets it see, and fewer fields per peer. Its reports are
-     labelled `DEGRADED` (`"degraded": true` in JSON), and recording a baseline from it needs
-     `--allow-partial`. Use the API for production monitoring.
+     labelled `DEGRADED` (`"degraded": true` in JSON), and recording a baseline from it (or
+     `--accept`ing into one) needs `--allow-partial`. It refuses a `tailscaled` older than 1.104.2,
+     the first release with the October 2026 security fixes, because everything it reports comes
+     from that daemon. Use the API for production monitoring.
    - `--source auto` (the default) uses the API when credentials are set, else the local daemon.
 2. **Baseline.** `sentry baseline` records the known-good state of each device to a local JSON
    file: id, name, owner, OS, tags, addresses, client version, key expiry, authorization,
@@ -98,7 +100,9 @@ line in `SHA256SUMS` instead of running `sha256sum`. Then rename the binary to `
 The binary has no dependencies beyond the Go standard library. The `local` source and the
 isolate self-check need the `tailscale` CLI. Sentry looks in Tailscale's default install locations
 first and only then on `PATH`, so a writable directory early in a scheduler's `PATH` cannot stand
-in for it.
+in for it. On Unix it refuses a CLI that anyone but root or you could replace: the file, the
+directories above it, and the directories above a symlink's target are all checked. On Windows it
+runs only the CLI in Tailscale's install location.
 
 ## Quick start: dry run against your tailnet
 
@@ -224,7 +228,7 @@ used to hide a device that still has access.
 | `key-expired` | high | the node key has expired | api, local |
 | `key-expiry-disabled` | medium | key expiry was turned off since the baseline (or on a new device) | api, local |
 | `key-expiring` | medium | the key expires within `expiryWarnDays` (default 14) | api, local |
-| `client-outdated` | medium | the client is older than `minClientVersion` | api (local: own device only) |
+| `client-outdated` | medium | the client is older than `minClientVersion` (default 1.104.2) | api (local: own device only) |
 | `client-changed` | medium | a known device's client went *down* a version, or is a different build of the same version (upgrades stay quiet) | api (local: own device only) |
 | `stale` | low | offline and not seen for `staleDays` (default 30) | api, local |
 | `update-available` | low | Tailscale reports a client update | api |
@@ -241,10 +245,13 @@ Tune them with `--rules file.json` (unknown keys are an error, so typos fail lou
   "allowedRoutes": [],
   "expiryWarnDays": 14,
   "staleDays": 30,
-  "minClientVersion": "1.90.0",
+  "minClientVersion": "1.104.2",
   "disabled": ["update-available"]
 }
 ```
+
+Without a rules file, `minClientVersion` is 1.104.2, the first release with the October 2026
+security fixes, so a device on an older client is an anomaly. Set it to `""` to turn the check off.
 
 `sentry rules` lists them all.
 
@@ -288,7 +295,7 @@ Treat exit 1 *and* exit 2 as alerts: an error means the check did not run.
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/tailnet-sentry/env
-ExecStart=/usr/local/bin/sentry scan --json
+ExecStart=/usr/local/bin/sentry scan --source api --json
 # /etc/systemd/system/tailnet-sentry.timer
 [Timer]
 OnCalendar=*:0/30

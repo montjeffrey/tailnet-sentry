@@ -25,8 +25,10 @@ LOG_DIR=${SENTRY_LOG_DIR:-/var/log/tailnet-sentry}
 mkdir -p "$LOG_DIR"
 
 # sentry reads SENTRY_WEBHOOK itself, so the URL (which embeds its own
-# secret) never appears on a command line.
-sentry scan --json >"$LOG_DIR/last-scan.json" 2>"$LOG_DIR/last-scan.err"
+# secret) never appears on a command line. --source api makes a missing
+# credential an error (exit 2) instead of a quiet fall back to the local
+# source's partial view.
+sentry scan --source api --json >"$LOG_DIR/last-scan.json" 2>"$LOG_DIR/last-scan.err"
 code=$?
 
 case $code in
