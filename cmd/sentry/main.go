@@ -516,8 +516,10 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	}
 
 	noteSSHGaps(d.stderr, inv, &base)
-	if inv.Control != nil && len(cfg.PolicyTests) > 0 && !slices.Contains(cfg.Disabled, "policy-tests") {
-		if inv.Control.PolicyTests, err = runPolicyTests(ctx, &c, d, inv.Control, cfg.PolicyTests); err != nil {
+	if len(cfg.PolicyTests) > 0 && !slices.Contains(cfg.Disabled, "policy-tests") {
+		if inv.Control == nil {
+			fmt.Fprintf(d.stderr, "sentry: note: the %d pinned policyTests did not run: they need the api source\n", len(cfg.PolicyTests))
+		} else if inv.Control.PolicyTests, err = runPolicyTests(ctx, &c, d, inv.Control, cfg.PolicyTests); err != nil {
 			return exitError, err
 		}
 	}
@@ -862,6 +864,9 @@ func cmdIsolate(ctx context.Context, args []string, d deps) error {
 	return execute(ctx, client, log, plan, entry, a.apply, d)
 }
 
+// retainedTimeout bounds the policy read behind isolate's residual report.
+const retainedTimeout = 10 * time.Second
+
 // printRetained says, before anything is re-tagged, which policy entries
 // would still grant the device access afterwards: re-tagging keeps its
 // Tailscale addresses, so a rule naming it by address (a hosts alias, an IP,
@@ -870,6 +875,13 @@ func cmdIsolate(ctx context.Context, args []string, d deps) error {
 // read the residual is unknown, which is said, but isolation goes ahead:
 // containing the device must not wait on a read scope.
 func printRetained(ctx context.Context, c *common, d deps, target inventory.Device) {
+	if len(target.Addresses) == 0 {
+		fmt.Fprintln(d.stdout, "residual access: unknown, the API reported no addresses for this device")
+		return
+	}
+	// Bounded, so a slow API cannot hold up containment for long.
+	ctx, cancel := context.WithTimeout(ctx, retainedTimeout)
+	defer cancel()
 	client, err := apiClient(c, d, tsapi.ScopePolicyRead)
 	var pol *inventory.Policy
 	if err == nil {

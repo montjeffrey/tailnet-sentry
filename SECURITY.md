@@ -23,7 +23,8 @@ The exception is `sentry probe`, which runs only when the operator invokes it.
 It opens a TCP connection from the device it runs on to each online peer in
 the inventory, on a configured port list, and closes it without sending data.
 It refuses any address outside the Tailscale ranges (`100.64.0.0/10`,
-`fd7a:115c:a1e0::/48`), skips the device it runs on, and needs no credential.
+`fd7a:115c:a1e0::/48`), skips the device it runs on and devices shared in
+from another tailnet, and needs no credential.
 
 The only other outbound connection is the optional webhook, to a URL the
 operator configures. It carries the scan report (device metadata and

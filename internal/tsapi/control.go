@@ -146,11 +146,11 @@ func (c *Client) ValidatePolicy(ctx context.Context, policy []byte) ([]string, e
 			Warnings []string `json:"warnings"`
 		} `json:"data"`
 	}
+	if trimmed := bytes.TrimSpace(b); trimmed[0] != '{' {
+		return nil, fmt.Errorf("tailscale API: POST %s: response is not a JSON object", path)
+	}
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, fmt.Errorf("tailscale API: POST %s: response is not JSON: %w", path, err)
-	}
-	if out.Message == "" {
-		return nil, nil
 	}
 	var failures []string
 	warned := false
@@ -164,17 +164,19 @@ func (c *Client) ValidatePolicy(ctx context.Context, policy []byte) ([]string, e
 		}
 		warned = warned || len(d.Warnings) > 0
 	}
-	// Warnings alone (a group not syncing from SCIM, say) are not a failure.
-	if len(failures) == 0 && !warned {
+	// Errors count whatever the message says. Warnings alone (a group not
+	// syncing from SCIM, say) are not a failure, and nor is no message.
+	if len(failures) == 0 && !warned && out.Message != "" {
 		failures = append(failures, Redact(out.Message, token, c.creds.APIKey, c.creds.ClientSecret))
 	}
 	return failures, nil
 }
 
 // WithTests returns policy, a policy file in JSON form, with its "tests"
-// replaced by tests, a JSON array. The policy's own tests are dropped (every
-// key that folds to "tests"), so that a failure can only be one of sentry's,
-// and an edit that deletes or weakens the policy's tests changes nothing.
+// replaced by tests, a JSON array. The policy's own tests, network and SSH
+// (every key that folds to "tests" or "sshTests"), are dropped, so that a
+// failure can only be one of sentry's, and an edit that deletes or weakens
+// the policy's tests changes nothing.
 func WithTests(policy, tests []byte) ([]byte, error) {
 	dec := json.NewDecoder(bytes.NewReader(policy))
 	dec.UseNumber()
@@ -187,7 +189,7 @@ func WithTests(policy, tests []byte) ([]byte, error) {
 		return nil, errors.New("pinned tests are not a JSON array")
 	}
 	for k := range top {
-		if strings.EqualFold(k, "tests") {
+		if strings.EqualFold(k, "tests") || strings.EqualFold(k, "sshTests") {
 			delete(top, k)
 		}
 	}

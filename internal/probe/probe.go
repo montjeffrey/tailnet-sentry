@@ -19,7 +19,6 @@ import (
 	"sort"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
@@ -53,12 +52,18 @@ type Target struct {
 
 // Targets returns every Tailscale address of every online device in inv
 // except the one isSelf reports (a probe of itself goes over loopback and
-// proves nothing about the tailnet). Offline devices are returned
-// separately, by short name: a connection to one fails whatever its policy
-// says, so it is not probed at all rather than reported closed.
-func Targets(inv inventory.Inventory, isSelf func(inventory.Device) bool) (targets []Target, offline []string) {
+// proves nothing about the tailnet), and except devices shared in from
+// another tailnet, which belong to someone else and are not sentry's to
+// probe. Offline devices are returned separately, by short name: a
+// connection to one fails whatever its policy says, so it is not probed at
+// all rather than reported closed. Shared-in devices are returned too.
+func Targets(inv inventory.Inventory, isSelf func(inventory.Device) bool) (targets []Target, offline, shared []string) {
 	for _, d := range inv.Devices {
 		if isSelf(d) {
+			continue
+		}
+		if d.External {
+			shared = append(shared, d.ShortName())
 			continue
 		}
 		if !d.Online {
@@ -73,7 +78,7 @@ func Targets(inv inventory.Inventory, isSelf func(inventory.Device) bool) (targe
 			targets = append(targets, Target{DeviceID: d.ID, Device: d.ShortName(), Addr: ip.Unmap()})
 		}
 	}
-	return targets, offline
+	return targets, offline, shared
 }
 
 // Result is one connection attempt.
@@ -81,8 +86,14 @@ type Result struct {
 	Target
 	Port int
 	Open bool
-	// Why says how a closed port failed: "refused", "timeout", or the
-	// error. Empty when the port answered.
+	// Failed means the attempt neither connected nor was refused nor timed
+	// out: the network was unreachable, the address family is not
+	// available here, the host ran out of sockets, or the address was not
+	// allowed. Such an attempt says nothing about the port, so it must
+	// never be read as closed.
+	Failed bool
+	// Why says how an attempt that did not connect ended: "refused",
+	// "timeout", or the error. Empty when the port answered.
 	Why string
 }
 
@@ -146,9 +157,9 @@ func (p Prober) Run(ctx context.Context, targets []Target, ports []int) ([]Resul
 			for j := range jobs {
 				r := Result{Target: j.t, Port: j.port}
 				if !allow(j.t.Addr) {
-					r.Why = "not a Tailscale address; not probed"
+					r.Failed, r.Why = true, "not a Tailscale address; not probed"
 				} else {
-					r.Open, r.Why = attempt(ctx, dial, j.t.Addr, j.port, timeout)
+					r.Open, r.Failed, r.Why = attempt(ctx, dial, j.t.Addr, j.port, timeout)
 				}
 				mu.Lock()
 				results = append(results, r)
@@ -185,23 +196,24 @@ feed:
 }
 
 // attempt connects once and closes the connection without sending anything.
-func attempt(ctx context.Context, dial Dialer, addr netip.Addr, port int, timeout time.Duration) (bool, string) {
+// Only a refusal or a timeout counts as closed; any other error is failed.
+func attempt(ctx context.Context, dial Dialer, addr netip.Addr, port int, timeout time.Duration) (open, failed bool, why string) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	conn, err := dial(ctx, Network(addr), net.JoinHostPort(addr.String(), strconv.Itoa(port)))
 	if err == nil {
 		_ = conn.Close()
-		return true, ""
+		return true, false, ""
 	}
 	switch {
-	case errors.Is(err, syscall.ECONNREFUSED):
-		return false, "refused"
+	case refused(err):
+		return false, false, "refused"
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
-		return false, "timeout"
+		return false, false, "timeout"
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		return false, "timeout"
+		return false, false, "timeout"
 	}
-	return false, err.Error()
+	return false, true, err.Error()
 }

@@ -91,9 +91,9 @@ type ProbeInfo struct {
 	Attempts int `json:"attempts"`
 	// Offline lists peers that were not probed because they are offline.
 	Offline []string `json:"offline,omitempty"`
-	// Unverified lists peers no expectedOpen entry applies to from here, so
-	// that their closed ports cannot be told from an unreachable peer.
-	Unverified []string `json:"unverified,omitempty"`
+	// Shared lists devices shared in from another tailnet, which belong to
+	// someone else and are never probed.
+	Shared []string `json:"shared,omitempty"`
 }
 
 // DegradedNote is printed with every report and baseline from the local
@@ -205,7 +205,7 @@ func (r Report) WriteTable(w io.Writer) error {
 		line += fmt.Sprintf(", %d quarantined", s.Quarantined)
 	}
 	fmt.Fprintln(w, line+".")
-	if s.Tailnet > 0 {
+	if s.Tailnet > 0 && r.Probe == nil {
 		fmt.Fprintf(w, "Tailnet configuration: %d %s (policy, keys, DNS or users); isolating a device will not undo these.\n",
 			s.Tailnet, plural(s.Tailnet, "finding", "findings"))
 	}
@@ -216,9 +216,8 @@ func (r Report) WriteTable(w io.Writer) error {
 		if len(r.Probe.Offline) > 0 {
 			fmt.Fprintf(w, "Not probed (offline): %s.\n", Clean(strings.Join(r.Probe.Offline, ", ")))
 		}
-		if len(r.Probe.Unverified) > 0 {
-			fmt.Fprintf(w, "Unverified (no expectedOpen port from here, so closed may mean unreachable): %s.\n",
-				Clean(strings.Join(r.Probe.Unverified, ", ")))
+		if len(r.Probe.Shared) > 0 {
+			fmt.Fprintf(w, "Not probed (shared in from another tailnet): %s.\n", Clean(strings.Join(r.Probe.Shared, ", ")))
 		}
 		// An answering port is fixed by the policy, a firewall or a bind on
 		// that peer, not by quarantining it.

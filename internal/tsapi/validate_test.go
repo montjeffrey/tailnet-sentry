@@ -74,7 +74,10 @@ func TestValidatePolicy(t *testing.T) {
 		{name: "401 is an error", status: 401, body: `{"message":"unauthorized"}`, wantErr: "401"},
 		{name: "403 is a scope denial", status: 403, body: `{"message":"not allowed"}`, wantErr: "403", denied: true},
 		{name: "500 is an error", status: 500, body: `oops`, wantErr: "500"},
-		{name: "a body that is not JSON is an error", body: `<html>`, wantErr: "not JSON"},
+		{name: "a body that is not JSON is an error", body: `<html>`, wantErr: "not a JSON object"},
+		{name: "errors without a message still fail", body: `{"data":[{"errors":["x"]}]}`, want: []string{"x"}},
+		{name: "a null body is an error", body: `null`, wantErr: "not a JSON object"},
+		{name: "an array body is an error", body: `[]`, wantErr: "not a JSON object"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,7 +135,7 @@ func TestValidatePolicyAsksOnlyForPolicyRead(t *testing.T) {
 
 func TestWithTestsReplacesThePolicysOwnTests(t *testing.T) {
 	policy := []byte(`{"grants":[{"src":["100.64.0.1"],"dst":["100.64.0.3"],"ip":["22"]}],` +
-		`"tests":[{"src":"100.64.0.1","accept":["100.64.0.3:22"]}],"Tests":[],"n":12345678901234567890}`)
+		`"tests":[{"src":"100.64.0.1","accept":["100.64.0.3:22"]}],"Tests":[],"sshTests":[{"src":"x"}],"n":12345678901234567890}`)
 	pinned := []byte(`[{"src":"100.64.0.3","deny":["100.64.0.1:22"]}]`)
 	out, err := WithTests(policy, pinned)
 	if err != nil {
@@ -148,6 +151,9 @@ func TestWithTestsReplacesThePolicysOwnTests(t *testing.T) {
 	}
 	if _, ok := got["Tests"]; ok {
 		t.Error("a differently cased tests key survived")
+	}
+	if _, ok := got["sshTests"]; ok {
+		t.Error("the policy's own sshTests survived")
 	}
 	if string(got["n"]) != "12345678901234567890" {
 		t.Errorf("a large number was rewritten: %s", got["n"])

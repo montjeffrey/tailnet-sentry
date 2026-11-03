@@ -260,6 +260,10 @@ func RetainedSources(pol *inventory.Policy, addrs []string) []string {
 	if pol == nil {
 		return nil
 	}
+	if pol.NoRules {
+		return []string{"the policy has no acls or grants section, so Tailscale applies its default allow-all policy " +
+			"and the device keeps all access"}
+	}
 	var own []netip.Addr
 	for _, a := range addrs {
 		if ip, err := netip.ParseAddr(strings.TrimSpace(a)); err == nil {

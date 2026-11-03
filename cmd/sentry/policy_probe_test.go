@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
@@ -250,6 +251,8 @@ func probePeers() []inventory.Device {
 			Addresses: []string{"100.64.0.3", "fd7a:115c:a1e0::3"}},
 		{ID: "nOLDCNTRL", Name: "old.example.ts.net", Owner: "alice@github", OS: "linux", Online: false,
 			Addresses: []string{"100.64.0.9"}},
+		{ID: "nGUESTCNTRL", Name: "friend.example.ts.net", Owner: "carol@example.com", OS: "linux", Online: true,
+			External: true, Addresses: []string{"100.64.0.50"}},
 	}
 }
 
@@ -292,7 +295,7 @@ func (f *fakeTailnet) dial(ctx context.Context, network, address string) (net.Co
 	f.dialed = append(f.dialed, network+" "+address)
 	f.mu.Unlock()
 	if !f.open[address] {
-		return nil, errors.New("connection refused")
+		return nil, &net.OpError{Op: "dial", Net: network, Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}
 	}
 	var d net.Dialer
 	return d.DialContext(ctx, "tcp4", f.ln.Addr().String())
@@ -308,8 +311,9 @@ func TestProbe(t *testing.T) {
 	}{
 		{name: "only the expected port answers", code: exitClean,
 			open: []string{"100.64.0.3:7470", "[fd7a:115c:a1e0::3]:7470"},
-			want: []string{"tailnet-sentry probe  from: desktop  source: local", "nas", "healthy", "Not probed (offline): old."},
-			not:  []string{"port-reachable", "probe-inconclusive", "sentry isolate"}},
+			want: []string{"tailnet-sentry probe  from: desktop  source: local", "nas", "healthy", "Not probed (offline): old.",
+				"Not probed (shared in from another tailnet): friend."},
+			not: []string{"port-reachable", "probe-inconclusive", "sentry isolate"}},
 		{name: "a dev database answering on IPv6 only", code: exitAnomalies,
 			open: []string{"100.64.0.3:7470", "[fd7a:115c:a1e0::3]:7470", "[fd7a:115c:a1e0::3]:54322"},
 			want: []string{"high  nas  port-reachable  tcp/54322 answers from desktop on fd7a:115c:a1e0::3;"},
@@ -348,7 +352,7 @@ func TestProbe(t *testing.T) {
 			}
 			for _, dl := range tn.dialed {
 				network, addr, _ := strings.Cut(dl, " ")
-				if strings.Contains(addr, "100.64.0.1:") || strings.Contains(addr, "100.64.0.9:") {
+				if strings.Contains(addr, "100.64.0.1:") || strings.Contains(addr, "100.64.0.9:") || strings.Contains(addr, "100.64.0.50:") {
 					t.Errorf("dialed %s", addr)
 				}
 				if v6 := strings.HasPrefix(addr, "["); (network == "tcp6") != v6 {
@@ -376,20 +380,21 @@ func TestProbeJSONAndAPISource(t *testing.T) {
 			Rule, Device string
 		} `json:"findings"`
 		Probe struct {
-			From       string   `json:"from"`
-			Ports      []int    `json:"ports"`
-			Attempts   int      `json:"attempts"`
-			Unverified []string `json:"unverified"`
+			From     string `json:"from"`
+			Ports    []int  `json:"ports"`
+			Attempts int    `json:"attempts"`
 		} `json:"probe"`
 	}
 	if err := json.Unmarshal([]byte(out), &rep); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
-	if rep.Source != "api" || rep.Probe.From != "desktop" || !slices.Equal(rep.Probe.Ports, []int{22}) || rep.Probe.Attempts != 2 ||
-		!slices.Equal(rep.Probe.Unverified, []string{"nas", "pi"}) {
+	if rep.Source != "api" || rep.Probe.From != "desktop" || !slices.Equal(rep.Probe.Ports, []int{22}) || rep.Probe.Attempts != 2 {
 		t.Errorf("report = %+v", rep)
 	}
-	if len(rep.Findings) != 1 || rep.Findings[0].Rule != "port-reachable" || rep.Findings[0].Device != "nas" {
+	// nas answered, which proves the path; pi answered nothing and has no
+	// control, so it is unverified (low).
+	if len(rep.Findings) != 2 || rep.Findings[0].Rule != "port-reachable" || rep.Findings[0].Device != "nas" ||
+		rep.Findings[1].Rule != "probe-unverified" || rep.Findings[1].Device != "pi" {
 		t.Errorf("findings = %+v", rep.Findings)
 	}
 }
@@ -406,5 +411,45 @@ func TestProbeNeedsTheLocalDevice(t *testing.T) {
 	code, _, errOut := h.run("probe", "--source", "api")
 	if code != exitError || !strings.Contains(errOut, "identify the device it runs on") {
 		t.Errorf("exit %d: %s", code, errOut)
+	}
+}
+
+// A run that could prove nothing is not clean: with no expectedOpen entry
+// and no answer anywhere it exits 1, and with nothing to probe it is an error.
+func TestProbeThatProvesNothingIsNotClean(t *testing.T) {
+	h := newHarness(t)
+	h.peers = probePeers()
+	h.prober = probe.Prober{Dial: newFakeTailnet(t).dial}
+	rulesFile := writeFile(t, t.TempDir(), "rules.json", `{"probe": {"forbiddenPorts": [22]}}`)
+	code, out, errOut := h.run("probe", "--source", "local", "--rules", rulesFile)
+	if code != exitAnomalies || !strings.Contains(out, "no port answered on any peer from desktop") {
+		t.Errorf("no control, nothing answers: exit %d\n%s%s", code, out, errOut)
+	}
+
+	h.peers = probePeers()[1:] // only the offline and the shared-in device
+	code, _, errOut = h.run("probe", "--source", "local", "--rules", rulesFile)
+	if code != exitError || !strings.Contains(errOut, "no online peer to probe") {
+		t.Errorf("nothing to probe: exit %d %s", code, errOut)
+	}
+
+	h.peers = probePeers()
+	empty := writeFile(t, t.TempDir(), "rules.json", `{"probe": {"forbiddenPorts": []}}`)
+	code, _, errOut = h.run("probe", "--source", "local", "--rules", empty)
+	if code != exitError || !strings.Contains(errOut, "no ports to probe") {
+		t.Errorf("no ports: exit %d %s", code, errOut)
+	}
+}
+
+// Pinned tests need the API. A local scan says they did not run rather
+// than staying silent.
+func TestLocalScanSaysPinnedTestsDidNotRun(t *testing.T) {
+	h := newHarness(t)
+	if code, out, errOut := h.run("baseline", "--source", "local", "--allow-partial"); code != exitClean {
+		t.Fatalf("baseline exit %d\n%s%s", code, out, errOut)
+	}
+	rulesFile := writeFile(t, t.TempDir(), "rules.json", pinnedRules)
+	_, _, errOut := h.run("scan", "--source", "local", "--rules", rulesFile)
+	if !strings.Contains(errOut, "the 2 pinned policyTests did not run: they need the api source") {
+		t.Errorf("stderr lacks the note:\n%s", errOut)
 	}
 }

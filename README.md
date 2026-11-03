@@ -47,7 +47,8 @@ Dry run: nothing was changed. Re-run with --apply to do this.
 > a TCP connection from the device it runs on to each online peer *in your own tailnet*, on a
 > port list you configure, and closes it at once without sending data. It connects only to
 > Tailscale addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) of devices in the inventory, never
-> to itself and never to anything else. See [Probing from a peer](#probing-from-a-peer).
+> to itself, never to devices shared in from another tailnet, and never to anything else. See
+> [Probing from a peer](#probing-from-a-peer).
 >
 > The other outbound exception is the optional webhook: if *you* configure one, the report
 > (device names, owners, IDs and findings) is POSTed to the https URL you chose.
@@ -384,19 +385,26 @@ high  nas  port-reachable  tcp/54322 answers from desktop on 100.64.0.3 and fd7a
 - **An expected port is also the control.** A peer that answers nothing cannot be told from one
   that is unreachable from here (the tailnet down, a wrong route, an IPv6 path that never worked).
   So when none of a peer address's expected ports answers, that address is `probe-inconclusive`
-  rather than clean. Peers with no `expectedOpen` entry from this vantage are listed as
-  **unverified**.
+  rather than clean. An address with no `expectedOpen` entry from this vantage that answers nothing
+  is `probe-unverified` (low), and a run where no address has a control and nothing answers at all
+  is `probe-inconclusive` for the whole tailnet. Controls count per address: one given as an IPv4
+  address does not vouch for the device's IPv6 address.
+- **Only a refusal or a timeout counts as closed.** Any other dial error (no route, no IPv6 on this
+  machine, out of sockets) says nothing about the port, so it makes that address
+  `probe-inconclusive`. A run with no online peer or no port to try is an error (exit 2).
 - **Each address is dialled with a socket of its own family**, `tcp4` or `tcp6`. An IPv4-only
   socket handed an IPv6 address fails as if the port were closed, which hides IPv6 exposure.
 - **Offline peers are not probed** (a closed reading would mean nothing), and are listed as such.
-  The device sentry runs on is never probed: that would go over loopback and prove nothing.
+  Neither are devices **shared in from another tailnet**: they belong to someone else. The device
+  sentry runs on is never probed either: that would go over loopback and prove nothing.
 - Each attempt times out after 1.5 s (`--timeout`), up to 32 at once. A filtered port costs the full
   timeout.
 
 | Rule | Severity | Fires when |
 | --- | --- | --- |
 | `port-reachable` | high | a peer answers on a forbidden port that `expectedOpen` does not allow from this vantage. One finding per peer and port, naming every address that answered |
-| `probe-inconclusive` | medium | none of the expected-open ports answered on one of a peer's addresses, so its closed ports there prove nothing |
+| `probe-inconclusive` | medium | on one of a peer's addresses an attempt failed with an error, or none of its expected-open ports answered, so its closed ports there prove nothing. Also once for the run when no address has a control and nothing answered anywhere |
+| `probe-unverified` | low | an address with no `expectedOpen` entry from this vantage answered nothing, so closed cannot be told from unreachable |
 
 `probe` needs no credential: by default it takes the peer list from the local `tailscaled`
 (`--source local`), which lists every peer this device can reach. It still needs that

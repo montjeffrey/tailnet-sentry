@@ -79,6 +79,10 @@ func TestRetainedSources(t *testing.T) {
 	if got := RetainedSources(nil, []string{"100.64.0.1"}); got != nil {
 		t.Errorf("no policy: %q", got)
 	}
+	// No acls or grants is Tailscale's default allow-all: everything stays.
+	if got := RetainedSources(&inventory.Policy{NoRules: true}, []string{"100.64.0.1"}); len(got) != 1 || !strings.Contains(got[0], "default allow-all") {
+		t.Errorf("no rules: %q", got)
+	}
 }
 
 // The shipped example must load: it is what people copy.

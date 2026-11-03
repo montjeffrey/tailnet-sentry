@@ -71,8 +71,15 @@ func cmdProbe(ctx context.Context, args []string, d deps) (int, error) {
 		}
 	}
 
-	targets, offline := probe.Targets(inv, self.Matches)
+	targets, offline, shared := probe.Targets(inv, self.Matches)
 	ports := rules.ProbePorts(cfg, from)
+	// A run that tries nothing proves nothing, so it is an error, not clean.
+	if len(ports) == 0 {
+		return exitError, fmt.Errorf("no ports to probe from %s: probe.forbiddenPorts is empty and no expectedOpen entry applies here", from.Name)
+	}
+	if len(targets) == 0 {
+		return exitError, fmt.Errorf("no online peer to probe from %s (offline: %s)", from.Name, listOrNone(offline))
+	}
 	p := d.prober
 	p.Timeout = *timeout
 	results, err := p.Run(ctx, targets, ports)
@@ -92,8 +99,7 @@ func cmdProbe(ctx context.Context, args []string, d deps) (int, error) {
 		}
 	}
 	rep := report.Build(probed, nil, findings, version, d.now())
-	rep.Probe = &report.ProbeInfo{From: from.Name, Ports: ports, Attempts: len(results), Offline: offline,
-		Unverified: rules.ProbeUnverified(cfg, from, targets)}
+	rep.Probe = &report.ProbeInfo{From: from.Name, Ports: ports, Attempts: len(results), Offline: offline, Shared: shared}
 	if c.json {
 		err = rep.WriteJSON(d.stdout)
 	} else {

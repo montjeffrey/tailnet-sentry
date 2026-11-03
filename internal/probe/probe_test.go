@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"os"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,9 +45,11 @@ func TestTargets(t *testing.T) {
 		// An address outside the Tailscale ranges is never a target, even
 		// if a source reports one.
 		{ID: "nODD", Name: "odd.example.ts.net", Online: true, Addresses: []string{"192.168.1.10", "not-an-ip"}},
+		// Shared in from another tailnet: someone else's device, never probed.
+		{ID: "nGUEST", Name: "friend-nas.example.ts.net", Online: true, External: true, Addresses: []string{"100.64.0.50"}},
 	}}
 	isSelf := func(d inventory.Device) bool { return d.ID == "nSELF" }
-	targets, offline := Targets(inv, isSelf)
+	targets, offline, shared := Targets(inv, isSelf)
 	var got []string
 	for _, tg := range targets {
 		got = append(got, tg.Device+" "+tg.Addr.String())
@@ -55,6 +59,9 @@ func TestTargets(t *testing.T) {
 	}
 	if !slices.Equal(offline, []string{"old-laptop"}) {
 		t.Errorf("offline = %q", offline)
+	}
+	if !slices.Equal(shared, []string{"friend-nas"}) {
+		t.Errorf("shared = %q", shared)
 	}
 }
 
@@ -113,6 +120,11 @@ func TestRunAgainstLocalListeners(t *testing.T) {
 		}
 		if !r.Open && r.Why == "" {
 			t.Errorf("port %d closed with no reason", r.Port)
+		}
+		// A real refusal (or, on Windows, a slow one timing out) is closed,
+		// not failed: this catches a platform whose refusal goes unrecognised.
+		if r.Failed {
+			t.Errorf("port %d read as failed (%s), want refused or timeout", r.Port, r.Why)
 		}
 	}
 }
@@ -175,9 +187,39 @@ func TestRunNeverDialsOutsideTheTailnet(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range got {
-		if r.Open || r.Why == "" {
-			t.Errorf("%+v, want closed with a reason", r)
+		if r.Open || !r.Failed || r.Why == "" {
+			t.Errorf("%+v, want failed with a reason", r)
 		}
+	}
+}
+
+// Only a refusal or a timeout says a port is closed. Any other error (no
+// route, no IPv6 here, out of sockets) says nothing, and must be marked
+// failed rather than read as closed.
+func TestRunClassifiesErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		failed bool
+		why    string
+	}{
+		{name: "refused", err: &net.OpError{Op: "dial", Net: "tcp4", Err: os.NewSyscallError("connect", syscall.ECONNREFUSED)}, why: "refused"},
+		{name: "no route", err: &net.OpError{Op: "dial", Net: "tcp4", Err: os.NewSyscallError("connect", syscall.ENETUNREACH)}, failed: true},
+		{name: "no such family", err: &net.OpError{Op: "dial", Net: "tcp6", Err: os.NewSyscallError("socket", syscall.EAFNOSUPPORT)}, failed: true},
+		{name: "out of sockets", err: &net.OpError{Op: "dial", Net: "tcp4", Err: os.NewSyscallError("socket", syscall.EMFILE)}, failed: true},
+		{name: "anything else", err: errors.New("weird"), failed: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dial := func(context.Context, string, string) (net.Conn, error) { return nil, tc.err }
+			got, err := (Prober{Dial: dial}).Run(context.Background(), []Target{{Device: "nas", Addr: netip.MustParseAddr("100.64.0.3")}}, []int{22})
+			if err != nil || len(got) != 1 {
+				t.Fatalf("%v %+v", err, got)
+			}
+			if r := got[0]; r.Open || r.Failed != tc.failed || (tc.why != "" && r.Why != tc.why) {
+				t.Errorf("%+v, want failed=%v why=%q", r, tc.failed, tc.why)
+			}
+		})
 	}
 }
 
