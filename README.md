@@ -39,11 +39,17 @@ Dry run: nothing was changed. Re-run with --apply to do this.
 
 > **tailnet-sentry only looks at the tailnet its credential belongs to, and only through two data
 > sources: the official Tailscale API (`api.tailscale.com`) and the local `tailscaled`.
-> It does no network scanning of any kind.** It sends no packets to devices, probes no ports,
-> and reads nothing about any host outside your tailnet. The API endpoint is a compile-time
-> constant, not a setting.
+> `scan`, `baseline`, `isolate` and `release` do no network scanning of any kind.** They send no
+> packets to devices, probe no ports, and read nothing about any host outside your tailnet. The API
+> endpoint is a compile-time constant, not a setting.
 >
-> The one outbound exception is the optional webhook: if *you* configure one, the scan report
+> **The one command that does send packets is `sentry probe`, and only when you run it.** It opens
+> a TCP connection from the device it runs on to each online peer *in your own tailnet*, on a
+> port list you configure, and closes it at once without sending data. It connects only to
+> Tailscale addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`) of devices in the inventory, never
+> to itself and never to anything else. See [Probing from a peer](#probing-from-a-peer).
+>
+> The other outbound exception is the optional webhook: if *you* configure one, the report
 > (device names, owners, IDs and findings) is POSTed to the https URL you chose.
 
 "Scan" here means *inventory*: asking Tailscale's control plane which devices are enrolled and how
@@ -81,6 +87,10 @@ they are configured.
    optionally deauthorizes it. A tailnet policy that gives `tag:quarantine` no access does the
    blocking. It runs as a dry run unless you pass `--apply`, refuses to isolate the machine it
    runs on, and writes every action to an append-only audit log. `sentry release` undoes it.
+   Before re-tagging it lists the policy entries that would still match the device by address.
+5. **Probe** (opt-in, separate). `sentry probe` TCP-connects from this device to its peers on a
+   forbidden port list, over IPv4 and IPv6, and reports what answers
+   ([below](#probing-from-a-peer)). It is the only command that sends packets to devices.
 
 ## Install
 
@@ -148,7 +158,11 @@ or an error message. If both are set, the OAuth client wins.
 | | `GET /tailnet/{tailnet}/keys` | **`auth_keys:read`** (`auth-key-risky`, `credential-new`) |
 | | `GET /tailnet/{tailnet}/dns/nameservers`, `GET /tailnet/{tailnet}/dns/split-dns` | **`dns:read`** (`dns-changed`) |
 | | `GET /tailnet/{tailnet}/users` | **`users:read`** (`new-user`, `user-role-changed`) |
+| …and pinned policy tests, when `policyTests` is set | `POST /tailnet/{tailnet}/acl/validate` (evaluates, saves nothing) | **`policy_file:read`** (`policy-tests`). Never the write scope `policy_file` |
+| `probe` with `--source local` | `tailscale status --json`, then TCP connects to peers | none |
+| `probe` with `--source api` | `GET /tailnet/{tailnet}/devices`, then TCP connects to peers | OAuth client with **`devices:core:read`** |
 | `isolate`, `release` (dry run) | `GET /tailnet/{tailnet}/devices` | OAuth client with **`devices:core:read`** |
+| …and the residual-access report, optional | `GET /tailnet/{tailnet}/acl` | **`policy_file:read`**; without it `isolate` says the residual is unknown and carries on |
 | `isolate --apply`, `release --apply` | `POST /device/{id}/tags`, `POST /device/{id}/authorized` | OAuth client with **`devices:core`** and tag **`tag:quarantine`** selected; select too any tags `release` must put back, since only a tag's owners may apply it |
 
 Each control-plane section is fetched with a token requested for that one scope. If the client was
@@ -205,10 +219,27 @@ cannot opt out.
 These would still let a quarantined device through:
 - The default allow-all rule (`"src": ["*"], "dst": ["*"]`).
 - Any rule whose source is `*` or `autogroup:tagged`.
+- Any rule that names the device by **address**: a `hosts` alias, an IP, or a prefix that covers
+  it. Re-tagging changes the device's identity, not its Tailscale IP.
 
-The `tests` block catches either of these *for the destinations and ports it lists*: a failing
+The `tests` block catches the first two *for the destinations and ports it lists*: a failing
 test stops the policy from saving. Add a `deny` line for each tagged server you care about
-(for example `"tag:server:22"`); a test only checks what it names.
+(for example `"tag:server:22"`); a test only checks what it names. Whoever can edit the policy can
+delete its `tests` block in the same edit, so keep a copy as `policyTests` in your rules file too:
+`sentry scan` runs those through Tailscale's evaluator on every scan (`policy-tests`).
+
+Before it changes anything, `isolate` prints the **residual access**: each policy entry whose `src`
+would still match the device after re-tagging (an address-based source, or one matching any tagged
+device), and where it leads:
+
+```text
+residual access: re-tagging keeps the device's addresses, so these policy entries still match it:
+  - grants[0] src "desktop","desktop-v6" still matches it (to nas)
+  remove the device from them to cut that access too
+```
+
+It reads the policy with `policy_file:read`. Without that scope it says the residual is unknown,
+and isolation goes ahead anyway: containing a device must not wait on a read.
 
 Limits:
 - **Release of a user-owned device.** Tailscale will not remove every tag from a device through
@@ -268,6 +299,7 @@ scope shown; see [Token scopes](#token-scopes).
 | `control-unreadable` | high | a section the baseline records (policy, keys, DNS or users) could not be read this scan, because the credential lost the scope or the request failed, so its rules did not run | the section's scope |
 | `policy-permissive` | high | an `acls`, `grants` or `ssh` entry has a `src` a quarantined device still matches: `*`, `autogroup:tagged`, `autogroup:danger-all`, `tag:quarantine`, or addresses covering more than one Tailscale address (a prefix, an `a-b` range, a `hosts` alias or an `ipset`). Also fires when the policy has neither `acls` nor `grants`, which Tailscale treats as allow-all. Fires on the current policy whatever the baseline says | `policy_file:read` |
 | `policy-changed` | high | the policy file's sha256 differs from the baseline's. The digest is over the canonical JSON form, so whitespace, comments and key order do not count | `policy_file:read` |
+| `policy-tests` | high | one of the rules file's `policyTests` fails against the current policy, as judged by Tailscale's own evaluator (`POST /acl/validate`, which saves nothing). The policy's own `tests` are replaced by sentry's for the check, so deleting them in the same edit hides nothing. **Fails closed:** with tests configured, an unreadable policy, a 401 or 403, or a failed request is a finding too | `policy_file:read` |
 | `auth-key-risky` | high | a live auth key not in the baseline is reusable, or is valid for longer than `authKeyMaxDays` (default 7). Revoked, expired and invalid keys are skipped | `auth_keys:read` |
 | `credential-new` | high | a live API access token or OAuth client is not in the baseline: persistence that outlives any device | `auth_keys:read` |
 | `dns-changed` | high | the global nameservers, or any split-DNS domain's nameservers, differ from the baseline (added, removed or repointed) | `dns:read` |
@@ -294,9 +326,22 @@ Tune them with `--rules file.json` (unknown keys are an error, so typos fail lou
   "staleDays": 30,
   "minClientVersion": "1.104.2",
   "authKeyMaxDays": 7,
-  "disabled": ["update-available"]
+  "disabled": ["update-available"],
+  "policyTests": [
+    {"src": "tag:quarantine", "deny": ["YOUR-LOGIN@github:22", "tag:server:22"]},
+    {"src": "nas", "deny": ["desktop:22", "desktop:445"]}
+  ],
+  "probe": {
+    "expectedOpen": [{"from": "desktop", "to": "nas", "port": 22}]
+  }
 }
 ```
+
+`policyTests` use the policy file's own test syntax (`src`, `accept`, `deny`, optional `proto`), and
+their names must mean something in your policy: a user, group, tag, `hosts` alias or IP. A name the
+policy does not define makes Tailscale reject the test, which is a `policy-tests` finding until you
+fix it. `probe` is read only by [`sentry probe`](#probing-from-a-peer).
+[`examples/sentry-rules.json`](examples/sentry-rules.json) has every key.
 
 Without a rules file, `minClientVersion` is 1.104.2, the first release with the October 2026
 security fixes, so a device on an older client is an anomaly. Set it to `""` to turn the check off.
@@ -306,6 +351,58 @@ security fixes, so a device on an older client is an anomaly. Set it to `""` to 
 know that `isolate` then changes a label and nothing else.
 
 `sentry rules` lists them all.
+
+## Probing from a peer
+
+Every rule above reads configuration. **`sentry probe` measures**: from the device it runs on, it
+TCP-connects to every online peer's Tailscale IPv4 **and** IPv6 address on a forbidden port list,
+and reports what answers. The policy, the peer's firewall and the services' bind addresses together
+decide that, so this catches what no config read can: a policy edit that opened a port, a firewall
+rule that went missing, or a dev database newly listening on every interface.
+
+```text
+$ sentry probe --rules sentry-rules.json
+tailnet-sentry probe  from: desktop  source: local  32 connections
+DEGRADED: local source, partial view. Devices this machine's policy hides, and devices awaiting approval, are not listed. Use the API source for full coverage.
+
+DEVICE  OWNER         OS     TAGS  STATUS
+nas     alice@github  linux  -     ANOMALY (high)
+
+FINDINGS
+high  nas  port-reachable  tcp/54322 answers from desktop on 100.64.0.3 and fd7a:115c:a1e0::3; it is on the forbidden list
+
+1 devices: 0 healthy, 1 anomaly.
+```
+
+- **Forbidden ports** default to SSH (22), SMB (445), RDP (3389), WinRM (5985), the Docker API
+  (2375, 2376), a local app (3100), the Supabase dev and CI stacks (54321-54324, 55321-55324) and
+  Redis (6379). Set `probe.forbiddenPorts` to replace the list.
+- **`probe.expectedOpen`** lists ports that should answer, as `{"from", "to", "port"}`. `from` is
+  the device the probe runs on (leave it out for any), and `to` a peer's name, node ID or address.
+  An expected port that answers is not a finding, even if it is also forbidden: SSH from your admin
+  machine, say.
+- **An expected port is also the control.** A peer that answers nothing cannot be told from one
+  that is unreachable from here (the tailnet down, a wrong route, an IPv6 path that never worked).
+  So when none of a peer address's expected ports answers, that address is `probe-inconclusive`
+  rather than clean. Peers with no `expectedOpen` entry from this vantage are listed as
+  **unverified**.
+- **Each address is dialled with a socket of its own family**, `tcp4` or `tcp6`. An IPv4-only
+  socket handed an IPv6 address fails as if the port were closed, which hides IPv6 exposure.
+- **Offline peers are not probed** (a closed reading would mean nothing), and are listed as such.
+  The device sentry runs on is never probed: that would go over loopback and prove nothing.
+- Each attempt times out after 1.5 s (`--timeout`), up to 32 at once. A filtered port costs the full
+  timeout.
+
+| Rule | Severity | Fires when |
+| --- | --- | --- |
+| `port-reachable` | high | a peer answers on a forbidden port that `expectedOpen` does not allow from this vantage. One finding per peer and port, naming every address that answered |
+| `probe-inconclusive` | medium | none of the expected-open ports answered on one of a peer's addresses, so its closed ports there prove nothing |
+
+`probe` needs no credential: by default it takes the peer list from the local `tailscaled`
+(`--source local`), which lists every peer this device can reach. It still needs that
+`tailscaled` to identify the device it runs on. Exit codes, `--fail-on`, `--json` and the webhook
+work as for `scan`. Run it on a schedule from more than one device: a probe sees only what is open
+*from where it runs*, and each vantage should be denied different things.
 
 ## Output and exit codes
 
@@ -366,6 +463,11 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (Ne
 Register-ScheduledTask -TaskName 'tailnet-sentry scan' -Action $action -Trigger $trigger
 ```
 
+For a probe, register the same script a second time with `-Probe` (and `-Rules <file>` for your
+`expectedOpen` list). It runs `sentry probe --source local`, so that task needs no credential at
+all. With `-Rules` the scan task also runs your pinned `policyTests`. On Linux, add a cron line
+running `sentry probe --source local --rules /etc/tailnet-sentry/rules.json --json`.
+
 The task runs under Windows PowerShell 5.1, whose path never changes (a Microsoft Store install of
 `pwsh` moves on every update). `conhost --headless` keeps a console window from flashing up on each
 run. The script's header has the full registration, including a logon trigger and run limits.
@@ -412,7 +514,8 @@ off the host sees a baseline change even if the host is lying.
   do damage without enrolling a device. With the scopes granted, sentry sees each of these on the
   next scan:
   - a policy edit (`policy-changed`), and in particular a rule that undoes quarantine
-    (`policy-permissive`);
+    (`policy-permissive`), or one that deletes the policy's own tests and then opens what they
+    guarded (`policy-tests`, from the copy in sentry's rules file);
   - a reusable or long-lived auth key minted to enrol a device later (`auth-key-risky`), or an
     API access token or OAuth client left behind for later (`credential-new`);
   - scopes removed from sentry's own client to blind it (`control-unreadable`);
@@ -420,12 +523,18 @@ off the host sees a baseline change even if the host is lying.
   - a new user, or a member promoted to admin or owner (`new-user`, `user-role-changed`);
   - Tailscale SSH turned on as a way between devices (`ssh-enabled`);
   - a node added past tailnet lock, unsigned (`tailnet-lock-unsigned`).
+- **A port open that the configuration says is closed.** A service bound to every interface, a
+  missing firewall rule, or a policy that allows more than intended all show up the same way to
+  `sentry probe`: the port answers from a peer (`port-reachable`), on IPv4 or IPv6.
 
 **What it cannot catch**
 
 - **Anything inside a device.** Malware on a baselined device with the same owner, tags and routes
   looks healthy. This is an inventory and configuration monitor, not an EDR, an IDS, or a traffic
-  analyser. It never sees packets.
+  analyser. It never sees packets. `sentry probe` opens connections but reads nothing from them.
+- **What a probe does not try.** It checks TCP only, only the ports it is given, and only from the
+  device it runs on. A port open to another peer, or a UDP service, goes unseen. It also cannot
+  tell *which* layer (policy, firewall, bind) let a connection through, only that one did.
 - **Anything between scans.** It polls. An attacker has the interval between runs, and a device
   that joins and leaves inside it goes unseen.
 - **Stopping a compromised admin or write credential.** Sentry reports what such an attacker
@@ -455,6 +564,9 @@ off the host sees a baseline change even if the host is lying.
 - **Isolation without the policy.** Without the quarantine policy (and with a `*` rule present),
   `isolate` changes a label and nothing else. With `policy_file:read`, `policy-permissive` reports
   such a rule on every scan.
+- **Address-based grants after isolation.** Re-tagging keeps a device's Tailscale IPs, so a grant
+  that names it by `hosts` alias or IP still applies. `isolate` lists these before acting; removing
+  the device from them is a policy edit you make.
 
 ## Files
 
@@ -477,7 +589,10 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
 Every test runs against recorded fixtures (`internal/*/testdata`) and `httptest` servers. None
-calls the real API or needs a tailnet. The anomaly rules are table-tested one by one in
+calls the real API or needs a tailnet. `POST /acl/validate` is mocked over HTTP, including the 401
+and 403 cases that must fail closed. The probe is tested against real listeners on `127.0.0.1` and
+`[::1]` (an IPv6-only listener proves each family gets its own socket), and end to end with a dialer
+that routes tailnet addresses to a local listener. The anomaly rules are table-tested one by one in
 `internal/rules/rules_test.go`. The end-to-end tests in `cmd/sentry/main_test.go` drive the real
 commands and also assert that a credential never reaches output, errors, the baseline or the audit
 log. `cmd/sentry/attack_scenarios_test.go` plays each takeover in the threat model against a

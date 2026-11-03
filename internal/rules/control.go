@@ -36,6 +36,7 @@ func AllControl() []ControlRule {
 		{"control-unreadable", High, "a section the baseline records could not be read, so its rules did not run", ControlUnreadable},
 		{"policy-permissive", High, "the policy lets a quarantined device keep access (src *, autogroup:tagged, ...)", PolicyPermissive},
 		{"policy-changed", High, "the tailnet policy file changed", PolicyChanged},
+		{"policy-tests", High, "sentry's pinned policy tests fail against the current policy, or could not be run", PolicyTests},
 		{"auth-key-risky", High, "a reusable or long-lived auth key was created", AuthKeyRisky},
 		{"credential-new", High, "a new API access token or OAuth client was created", CredentialNew},
 		{"dns-changed", High, "tailnet nameservers or split DNS changed", DNSChanged},
@@ -128,6 +129,26 @@ func PolicyChanged(_ Env, cur *inventory.Control, base *baseline.Baseline) []str
 	return []string{fmt.Sprintf("policy file changed since the baseline (sha256 %s, was %s)", short(cur.Policy.SHA256), short(was))}
 }
 
+// PolicyTests fires for each of sentry's pinned tests that Tailscale's
+// evaluator failed against the current policy, and once when the tests could
+// not be run at all. Not running is a finding, not silence: the tests are
+// configured, so a scan that cannot run them must not read as a pass.
+func PolicyTests(_ Env, cur *inventory.Control, _ *baseline.Baseline) []string {
+	if cur == nil || cur.PolicyTests == nil {
+		return nil
+	}
+	res := cur.PolicyTests
+	if res.NotRun != "" {
+		return []string{fmt.Sprintf("sentry's %d pinned policy tests did not run (%s), so nothing confirms the policy "+
+			"still denies what they pin", res.Tests, res.NotRun)}
+	}
+	var out []string
+	for _, f := range res.Failures {
+		out = append(out, "pinned policy test failed: "+f)
+	}
+	return out
+}
+
 // PolicyPermissive fires for every acls, grants or ssh entry whose src would
 // still match a device tagged only tag:quarantine, and for a policy with no
 // acls or grants at all, which Tailscale treats as allow-all. Isolation works
@@ -180,6 +201,28 @@ const maxIPSetDepth = 8
 // exactly one Tailscale address is left alone: nothing says that host is the
 // one that will be isolated.
 func matchesQuarantined(src string, pol *inventory.Policy, depth int) bool {
+	return srcMatches(src, pol, depth, func(lo, hi netip.Addr) bool {
+		for _, t := range []netip.Prefix{tailnetV4, tailnetV6} {
+			tlo, thi := t.Addr(), lastAddr(t)
+			if lo.BitLen() != tlo.BitLen() {
+				continue
+			}
+			// The overlap of [lo, hi] and the tailnet range holds two or more
+			// addresses exactly when its ends differ.
+			if from, to := maxAddr(lo, tlo), minAddr(hi, thi); from.Less(to) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// srcMatches reports whether a policy src selects a tagged device by tag
+// alone (every device, every tagged device, tag:quarantine), or names
+// addresses for which span reports true. Addresses come from an address, a
+// prefix, an a-b range, a hosts alias or an ipset, whose "remove:" entries
+// are ignored, which can only over-report.
+func srcMatches(src string, pol *inventory.Policy, depth int, span func(lo, hi netip.Addr) bool) bool {
 	raw := strings.TrimSpace(src)
 	switch strings.ToLower(raw) {
 	case "*", "autogroup:tagged", "autogroup:danger-all", QuarantineTag:
@@ -194,7 +237,7 @@ func matchesQuarantined(src string, pol *inventory.Policy, depth int) bool {
 			if strings.HasPrefix(e, "remove:") {
 				continue
 			}
-			if matchesQuarantined(strings.TrimPrefix(e, "add:"), pol, depth+1) {
+			if srcMatches(strings.TrimPrefix(e, "add:"), pol, depth+1, span) {
 				return true
 			}
 		}
@@ -204,21 +247,51 @@ func matchesQuarantined(src string, pol *inventory.Policy, depth int) bool {
 		raw = strings.TrimSpace(addr)
 	}
 	lo, hi, ok := addrSpan(raw)
-	if !ok {
+	return ok && span(lo, hi)
+}
+
+// RetainedSources lists the policy entries whose src would still match a
+// device with addrs once isolate has replaced its tags. Re-tagging removes a
+// device's user identity and old tags, but not its Tailscale addresses, so
+// an entry naming the device by address (a hosts alias, say) keeps granting
+// it access, and so does one matching any tagged device. Each line names the
+// entry, the src and the destinations it still reaches.
+func RetainedSources(pol *inventory.Policy, addrs []string) []string {
+	if pol == nil {
+		return nil
+	}
+	var own []netip.Addr
+	for _, a := range addrs {
+		if ip, err := netip.ParseAddr(strings.TrimSpace(a)); err == nil {
+			own = append(own, ip.Unmap())
+		}
+	}
+	covers := func(lo, hi netip.Addr) bool {
+		for _, ip := range own {
+			if ip.BitLen() == lo.BitLen() && !ip.Less(lo) && !hi.Less(ip) {
+				return true
+			}
+		}
 		return false
 	}
-	for _, t := range []netip.Prefix{tailnetV4, tailnetV6} {
-		tlo, thi := t.Addr(), lastAddr(t)
-		if lo.BitLen() != tlo.BitLen() {
+	var out []string
+	for _, r := range pol.Rules {
+		var kept []string
+		for _, s := range r.Src {
+			if srcMatches(s, pol, 0, covers) {
+				kept = append(kept, fmt.Sprintf("%q", s))
+			}
+		}
+		if len(kept) == 0 {
 			continue
 		}
-		// The overlap of [lo, hi] and the tailnet range holds two or more
-		// addresses exactly when its ends differ.
-		if from, to := maxAddr(lo, tlo), minAddr(hi, thi); from.Less(to) {
-			return true
+		dst := "nothing listed"
+		if len(r.Dst) > 0 {
+			dst = strings.Join(r.Dst, ",")
 		}
+		out = append(out, fmt.Sprintf("%s src %s still matches it (to %s)", r.Name(), strings.Join(kept, ","), dst))
 	}
-	return false
+	return out
 }
 
 // addrSpan reads an address, a prefix or an a-b range as its first and last

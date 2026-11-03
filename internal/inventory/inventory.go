@@ -94,6 +94,22 @@ type Control struct {
 	// Unread maps a section name (as baseline.Sections spells it) to the
 	// reason it could not be read: a missing scope or a failed request.
 	Unread map[string]string `json:"-"`
+	// PolicyTests is the outcome of sentry's own pinned policy tests, nil
+	// when none are configured.
+	PolicyTests *PolicyTestResult `json:"-"`
+}
+
+// PolicyTestResult is what Tailscale's evaluator (POST /acl/validate) said
+// about sentry's pinned tests run against the current policy file.
+type PolicyTestResult struct {
+	// Tests is how many tests were sent.
+	Tests int
+	// Failures holds Tailscale's message for each failed test; empty when
+	// they all passed.
+	Failures []string
+	// NotRun says why the tests could not be run, such as an unreadable
+	// policy or a refused request; empty when they ran.
+	NotRun string
 }
 
 // Policy is the tailnet policy file, reduced to what the rules check.
@@ -110,6 +126,9 @@ type Policy struct {
 	// NoRules is set when the file has neither an acls nor a grants
 	// section, for which Tailscale applies its default allow-all policy.
 	NoRules bool `json:"noRules,omitempty"`
+	// Raw is the policy file in JSON form as the API returned it, kept so
+	// the pinned tests can be run against it. It is never written out.
+	Raw []byte `json:"-"`
 }
 
 // PolicyRule is one entry of the policy's "acls", "grants" or "ssh" list.

@@ -3,13 +3,17 @@
 // flags anomalies, and can quarantine a flagged device.
 //
 // It reads only from the official Tailscale API and the local tailscaled.
-// It never sends a packet to a device, and never scans anything.
+// The one exception is the opt-in probe command, which TCP-connects from
+// this device to its own tailnet peers' Tailscale addresses on a configured
+// port list (internal/probe); scan, baseline, isolate and release never send
+// a packet to a device.
 //
 // Exit codes: 0 clean, 1 anomalies found, 2 error. See README.md.
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,6 +30,7 @@ import (
 	"github.com/montjeffrey/tailnet-sentry/internal/audit"
 	"github.com/montjeffrey/tailnet-sentry/internal/baseline"
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
+	"github.com/montjeffrey/tailnet-sentry/internal/probe"
 	"github.com/montjeffrey/tailnet-sentry/internal/quarantine"
 	"github.com/montjeffrey/tailnet-sentry/internal/report"
 	"github.com/montjeffrey/tailnet-sentry/internal/rules"
@@ -53,6 +58,9 @@ type deps struct {
 	webhookClient  *http.Client
 	local          func(context.Context) (inventory.Inventory, tsutil.Self, error)
 	operator       func() string
+	// prober makes the probe command's connections; tests point it at
+	// local listeners.
+	prober probe.Prober
 }
 
 func main() {
@@ -79,6 +87,7 @@ commands:
   baseline   record the current inventory as known-good
   isolate    quarantine a device with tag:quarantine (dry run unless --apply)
   release    undo isolate (dry run unless --apply)
+  probe      TCP-connect from this device to its tailnet peers on forbidden ports
   audit      verify the isolate/release audit log
   rules      list the anomaly rules
   version    print the version
@@ -109,6 +118,8 @@ func run(ctx context.Context, args []string, d deps) int {
 		err = cmdIsolate(ctx, rest, d)
 	case "release":
 		err = cmdRelease(ctx, rest, d)
+	case "probe":
+		code, err = cmdProbe(ctx, rest, d)
 	case "audit":
 		err = cmdAudit(rest, d)
 	case "rules":
@@ -376,6 +387,48 @@ func noteSSHGaps(w io.Writer, inv inventory.Inventory, base *baseline.Baseline) 
 	}
 }
 
+// runPolicyTests runs sentry's pinned tests against the policy this scan
+// read, through Tailscale's own evaluator: the policy with its tests replaced
+// by sentry's goes to POST /acl/validate, which saves nothing. The request
+// uses a token for policy_file:read alone. Anything that keeps the tests from
+// running (an unreadable policy, a refused or failed request) is recorded as
+// NotRun, which the policy-tests rule reports: with tests configured, not
+// knowing is not a pass. Only an interrupted scan is an error.
+func runPolicyTests(ctx context.Context, c *common, d deps, ctl *inventory.Control, tests []rules.PolicyTest) (*inventory.PolicyTestResult, error) {
+	res := &inventory.PolicyTestResult{Tests: len(tests)}
+	if ctl.Policy == nil || len(ctl.Policy.Raw) == 0 {
+		res.NotRun = "the policy file could not be read: " + firstNonEmpty(ctl.Unread[baseline.SectionPolicy], "unknown reason")
+		return res, nil
+	}
+	pinned, err := json.Marshal(tests)
+	if err != nil {
+		return nil, err
+	}
+	merged, err := tsapi.WithTests(ctl.Policy.Raw, pinned)
+	if err != nil {
+		res.NotRun = err.Error()
+		return res, nil
+	}
+	client, err := apiClient(c, d, tsapi.ScopePolicyRead)
+	if err != nil {
+		return nil, err
+	}
+	failures, err := client.ValidatePolicy(ctx, merged)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		why := "POST /acl/validate failed: " + report.Clean(err.Error())
+		if tsapi.ScopeDenied(err) {
+			why = "the credential may not run them (it needs " + string(tsapi.ScopePolicyRead) + "): " + report.Clean(err.Error())
+		}
+		res.NotRun = why
+		return res, nil
+	}
+	res.Failures = failures
+	return res, nil
+}
+
 func apiClient(c *common, d deps, scope tsapi.Scope) (*tsapi.Client, error) {
 	creds, err := tsapi.FromEnv(d.getenv)
 	if err != nil {
@@ -463,6 +516,11 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	}
 
 	noteSSHGaps(d.stderr, inv, &base)
+	if inv.Control != nil && len(cfg.PolicyTests) > 0 && !slices.Contains(cfg.Disabled, "policy-tests") {
+		if inv.Control.PolicyTests, err = runPolicyTests(ctx, &c, d, inv.Control, cfg.PolicyTests); err != nil {
+			return exitError, err
+		}
+	}
 
 	now := d.now()
 	findings := rules.Evaluate(inv, &base, cfg, now)
@@ -794,6 +852,7 @@ func cmdIsolate(ctx context.Context, args []string, d deps) error {
 	if !selfKnown {
 		fmt.Fprintln(d.stdout, "  - could not identify the device sentry runs on; --apply will need --force")
 	}
+	printRetained(ctx, &a.common, d, target)
 
 	entry := audit.Entry{
 		Action: audit.ActionIsolate, DeviceID: target.ID, DeviceName: target.Name,
@@ -801,6 +860,35 @@ func cmdIsolate(ctx context.Context, args []string, d deps) error {
 		Forced: *force, Reason: a.reason, Operator: d.operator(),
 	}
 	return execute(ctx, client, log, plan, entry, a.apply, d)
+}
+
+// printRetained says, before anything is re-tagged, which policy entries
+// would still grant the device access afterwards: re-tagging keeps its
+// Tailscale addresses, so a rule naming it by address (a hosts alias, an IP,
+// a prefix) still matches it, as does one matching any tagged device. The
+// policy is read with a token for policy_file:read alone. If it cannot be
+// read the residual is unknown, which is said, but isolation goes ahead:
+// containing the device must not wait on a read scope.
+func printRetained(ctx context.Context, c *common, d deps, target inventory.Device) {
+	client, err := apiClient(c, d, tsapi.ScopePolicyRead)
+	var pol *inventory.Policy
+	if err == nil {
+		pol, err = client.Policy(ctx)
+	}
+	if err != nil {
+		fmt.Fprintf(d.stdout, "residual access: unknown, the policy file could not be read (%s)\n", report.Clean(err.Error()))
+		return
+	}
+	kept := rules.RetainedSources(pol, target.Addresses)
+	if len(kept) == 0 {
+		fmt.Fprintln(d.stdout, "residual access: no policy entry names this device's addresses as a source, or matches any tagged device")
+		return
+	}
+	fmt.Fprintln(d.stdout, "residual access: re-tagging keeps the device's addresses, so these policy entries still match it:")
+	for _, k := range kept {
+		fmt.Fprintf(d.stdout, "  - %s\n", report.Clean(k))
+	}
+	fmt.Fprintln(d.stdout, "  remove the device from them to cut that access too")
 }
 
 func cmdRelease(ctx context.Context, args []string, d deps) error {
@@ -1021,6 +1109,9 @@ func cmdRules(args []string, d deps) error {
 	}
 	for _, r := range rules.AllControl() {
 		fmt.Fprintf(d.stdout, "%-22s %-7s %s (tailnet-wide, api only)\n", r.ID, r.Severity, r.Summary)
+	}
+	for _, r := range rules.AllProbe() {
+		fmt.Fprintf(d.stdout, "%-22s %-7s %s (sentry probe only)\n", r.ID, r.Severity, r.Summary)
 	}
 	return nil
 }

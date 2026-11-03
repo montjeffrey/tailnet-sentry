@@ -225,21 +225,44 @@ func (c *Client) SetAuthorized(ctx context.Context, deviceID string, authorized 
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
-	token, err := c.accessToken(ctx)
-	if err != nil {
-		return err
-	}
-	var rd io.Reader
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
-		rd = bytes.NewReader(b)
+		payload = b
+	}
+	resp, _, err := c.request(ctx, method, path, payload)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if out == nil {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBytes))
+		return nil
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(out); err != nil {
+		return fmt.Errorf("tailscale API: %s %s: decode response: %w", method, trimQuery(path), err)
+	}
+	return nil
+}
+
+// request sends one authenticated request, with body (JSON) when it is not
+// nil. A 2xx response is returned for the caller to read and close, with the
+// token it was sent with, for redaction; any other status is an error.
+func (c *Client) request(ctx context.Context, method, path string, body []byte) (*http.Response, Secret, error) {
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return nil, Secret{}, err
+	}
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
-		return err
+		return nil, Secret{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token.Reveal())
 	req.Header.Set("Accept", "application/json")
@@ -249,23 +272,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return c.wrap(method, path, err)
+		return nil, Secret{}, c.wrap(method, path, err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		defer resp.Body.Close()
 		if resp.StatusCode == http.StatusUnauthorized && c.creds.IsOAuth() {
 			c.dropToken()
 		}
-		return c.statusError(method, path, resp, token)
+		return nil, Secret{}, c.statusError(method, path, resp, token)
 	}
-	if out == nil {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBytes))
-		return nil
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxBodyBytes)).Decode(out); err != nil {
-		return fmt.Errorf("tailscale API: %s %s: decode response: %w", method, trimQuery(path), err)
-	}
-	return nil
+	return resp, token, nil
 }
 
 // accessToken returns the bearer token: the API key itself, or a cached OAuth

@@ -32,16 +32,27 @@
 # Windows PowerShell, to a Windows notification. (The Event Log is not used:
 # checking for an event source as a non-admin user throws, and creating one
 # needs admin rights.)
+#
+# -Probe runs `sentry probe` instead: TCP connections from this device to its
+# peers on the forbidden ports. It reads the peer list from the local
+# tailscaled, so it needs no credential at all. Register it as a second task
+# with -File `"$script`" -Probe -Rules C:\tools\tailnet-sentry\sentry-rules.json.
+
+param(
+    [switch]$Probe,
+    [string]$Rules
+)
 
 $ErrorActionPreference = 'Stop'
 
 $sentry = Join-Path $PSScriptRoot 'sentry.exe'
 if (-not (Test-Path $sentry)) { $sentry = (Get-Command sentry).Source }
 
+$mode = if ($Probe) { 'probe' } else { 'scan' }
 $logDir = Join-Path $env:LOCALAPPDATA 'tailnet-sentry\logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$out = Join-Path $logDir 'last-scan.json'
-$err = Join-Path $logDir 'last-scan.err'
+$out = Join-Path $logDir "last-$mode.json"
+$err = Join-Path $logDir "last-$mode.err"
 $alerts = Join-Path $logDir 'alerts.log'
 
 function Send-Alert([string]$message) {
@@ -68,8 +79,11 @@ function Send-Alert([string]$message) {
 # variable) itself, so that URL, which embeds its own secret, never appears
 # on the task's command line. --source api makes a missing credential an
 # error (exit 2) instead of a quiet fall back to the local source's partial
-# view.
-$p = Start-Process -FilePath $sentry -ArgumentList 'scan', '--source', 'api', '--json' -NoNewWindow -Wait -PassThru `
+# view. A probe uses the local source on purpose: it needs no credential.
+$argList = if ($Probe) { @('probe', '--source', 'local', '--json') } else { @('scan', '--source', 'api', '--json') }
+# Start-Process joins its arguments with spaces and quotes none of them.
+if ($Rules) { $argList += @('--rules', "`"$Rules`"") }
+$p = Start-Process -FilePath $sentry -ArgumentList $argList -NoNewWindow -Wait -PassThru `
     -RedirectStandardOutput $out -RedirectStandardError $err
 $code = $p.ExitCode
 
@@ -87,7 +101,7 @@ switch ($code) {
     default {
         $detail = Get-Content $err -Raw -ErrorAction SilentlyContinue
         if ($detail) { $detail = $detail.Trim(); if ($detail.Length -gt 200) { $detail = $detail.Substring(0, 200) } }
-        Send-Alert "scan failed (exit $code): $detail"
+        Send-Alert "$mode failed (exit $code): $detail"
     }
 }
 exit $code
