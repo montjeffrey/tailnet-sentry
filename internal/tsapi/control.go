@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"sort"
@@ -60,7 +61,7 @@ func ParsePolicy(raw []byte) (*inventory.Policy, error) {
 		return nil, err
 	}
 	sum := sha256.Sum256(canon)
-	p := &inventory.Policy{SHA256: hex.EncodeToString(sum[:])}
+	p := &inventory.Policy{SHA256: hex.EncodeToString(sum[:]), Raw: bytes.Clone(raw)}
 	for _, v := range fold(top, "hosts") {
 		hosts, _ := v.(map[string]any)
 		for name, addr := range hosts {
@@ -109,6 +110,91 @@ func ParsePolicy(raw []byte) (*inventory.Policy, error) {
 		}
 	}
 	return p, nil
+}
+
+// maxValidateBytes bounds the validate response, whose size grows with the
+// number of failing tests.
+const maxValidateBytes = 1 << 20
+
+// ValidatePolicy asks Tailscale's own evaluator to parse policy, a whole
+// policy file in JSON form, and run the tests in it. Nothing is saved.
+// Needs ScopePolicyRead.
+//
+// It returns one line per failed test, or nil when the file parsed and every
+// test passed. The API answers 200 either way and puts any problem in the
+// body; a non-2xx status, or a body that cannot be read, is an error.
+func (c *Client) ValidatePolicy(ctx context.Context, policy []byte) ([]string, error) {
+	path := c.tailnetPath("/acl/validate")
+	resp, token, err := c.request(ctx, http.MethodPost, path, policy)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxValidateBytes))
+	if err != nil {
+		return nil, c.wrap(http.MethodPost, path, err)
+	}
+	// An empty body, {}, or a body without a message means everything passed.
+	if len(bytes.TrimSpace(b)) == 0 {
+		return nil, nil
+	}
+	var out struct {
+		Message string `json:"message"`
+		Data    []struct {
+			User     string   `json:"user"`
+			Errors   []string `json:"errors"`
+			Warnings []string `json:"warnings"`
+		} `json:"data"`
+	}
+	if trimmed := bytes.TrimSpace(b); trimmed[0] != '{' {
+		return nil, fmt.Errorf("tailscale API: POST %s: response is not a JSON object", path)
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return nil, fmt.Errorf("tailscale API: POST %s: response is not JSON: %w", path, err)
+	}
+	var failures []string
+	warned := false
+	for _, d := range out.Data {
+		for _, e := range d.Errors {
+			line := e
+			if d.User != "" {
+				line = d.User + ": " + e
+			}
+			failures = append(failures, Redact(line, token, c.creds.APIKey, c.creds.ClientSecret))
+		}
+		warned = warned || len(d.Warnings) > 0
+	}
+	// Errors count whatever the message says. Warnings alone (a group not
+	// syncing from SCIM, say) are not a failure, and nor is no message.
+	if len(failures) == 0 && !warned && out.Message != "" {
+		failures = append(failures, Redact(out.Message, token, c.creds.APIKey, c.creds.ClientSecret))
+	}
+	return failures, nil
+}
+
+// WithTests returns policy, a policy file in JSON form, with its "tests"
+// replaced by tests, a JSON array. The policy's own tests, network and SSH
+// (every key that folds to "tests" or "sshTests"), are dropped, so that a
+// failure can only be one of sentry's, and an edit that deletes or weakens
+// the policy's tests changes nothing.
+func WithTests(policy, tests []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(policy))
+	dec.UseNumber()
+	var top map[string]any
+	if err := dec.Decode(&top); err != nil || top == nil {
+		return nil, errors.New("policy file is not a JSON object")
+	}
+	var list []any
+	if err := json.Unmarshal(tests, &list); err != nil {
+		return nil, errors.New("pinned tests are not a JSON array")
+	}
+	for k := range top {
+		if strings.EqualFold(k, "tests") || strings.EqualFold(k, "sshTests") {
+			delete(top, k)
+		}
+	}
+	top["tests"] = list
+	return json.Marshal(top)
 }
 
 // fold returns the values of every key in m equal to name under case folding,

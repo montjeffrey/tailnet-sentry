@@ -17,6 +17,7 @@ import (
 
 	"github.com/montjeffrey/tailnet-sentry/internal/audit"
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
+	"github.com/montjeffrey/tailnet-sentry/internal/probe"
 	"github.com/montjeffrey/tailnet-sentry/internal/tsapi"
 	"github.com/montjeffrey/tailnet-sentry/internal/tsutil"
 )
@@ -25,6 +26,8 @@ import (
 // stand-in for the Tailscale API. Nothing here reaches the network.
 
 const testKey = "tskey-api-kTEST0000CNTRL-ThisIsNotARealKey"
+
+const testSecret = "tskey-client-testsecret"
 
 var testNow = time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 
@@ -82,6 +85,11 @@ type fakeAPI struct {
 	splitDNS    map[string][]string
 	users       []apiDev
 	deny        map[string]bool // GET paths answered 403, as for a missing scope
+
+	validateStatus int      // status for POST /acl/validate, 200 when zero
+	validateBody   string   // its body
+	validated      []string // every policy sent to it
+	scopes         []string // scope of each OAuth token exchange
 }
 
 // set changes the fake's state under its lock.
@@ -94,6 +102,18 @@ func (f *fakeAPI) set(change func(f *fakeAPI)) {
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// OAuth clients exchange their secret for testKey, so the rest of the
+	// fake treats both credentials alike.
+	if r.URL.Path == "/oauth/token" {
+		_ = r.ParseForm()
+		if r.PostForm.Get("client_secret") != testSecret {
+			http.Error(w, `{"message":"invalid client"}`, http.StatusUnauthorized)
+			return
+		}
+		f.scopes = append(f.scopes, r.PostForm.Get("scope"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": testKey, "expires_in": 3600})
+		return
+	}
 	if r.Header.Get("Authorization") != "Bearer "+testKey {
 		http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 		return
@@ -116,6 +136,13 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = enc.Encode(f.splitDNS)
 	case r.Method == http.MethodGet && r.URL.Path == "/tailnet/-/users":
 		_ = enc.Encode(map[string]any{"users": f.users})
+	case r.Method == http.MethodPost && r.URL.Path == "/tailnet/-/acl/validate":
+		b, _ := io.ReadAll(r.Body)
+		f.validated = append(f.validated, string(b))
+		if f.validateStatus != 0 {
+			w.WriteHeader(f.validateStatus)
+		}
+		_, _ = io.WriteString(w, f.validateBody)
 	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/device/"):
 		f.attempts = append(f.attempts, r.URL.Path)
 		if f.fail != 0 && (f.failPath == "" || strings.HasSuffix(r.URL.Path, f.failPath)) {
@@ -183,6 +210,8 @@ type harness struct {
 	self     tsutil.Self
 	selfErr  error
 	hook     *httptest.Server
+	peers    []inventory.Device // added to the local tailscaled's view
+	prober   probe.Prober
 }
 
 func newHarness(t *testing.T) *harness {
@@ -215,13 +244,15 @@ func (h *harness) run(args ...string) (int, string, string) {
 				{ID: "nDESKTOPCNTRL", Name: "desktop.example.ts.net", Owner: "alice@github", OS: "windows",
 					Addresses: []string{"100.64.0.1"}, Authorized: true, Online: true, KeyExpiryDisabled: true},
 			}}
+			inv.Devices = append(inv.Devices, h.peers...)
 			return inv, h.self, nil
 		},
+		prober: h.prober,
 	}
 	if h.hook != nil {
 		d.webhookClient = h.hook.Client()
 	}
-	if args[0] != "rules" && args[0] != "version" {
+	if args[0] != "rules" && args[0] != "version" && args[0] != "probe" {
 		args = append(args, "--state-dir", h.stateDir)
 	}
 	code := run(context.Background(), args, d)

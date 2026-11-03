@@ -78,6 +78,22 @@ type Report struct {
 	// the credential could not read, whose rules did not run. A collector
 	// that sees a section appear here can tell the credential was narrowed.
 	Unread []string `json:"unread,omitempty"`
+	// Probe is set on a `sentry probe` report: the vantage it ran from and
+	// what it tried. Its devices are the peers it probed.
+	Probe *ProbeInfo `json:"probe,omitempty"`
+}
+
+// ProbeInfo describes one probe run.
+type ProbeInfo struct {
+	From  string `json:"from"`
+	Ports []int  `json:"ports"`
+	// Attempts is the number of connections tried (addresses × ports).
+	Attempts int `json:"attempts"`
+	// Offline lists peers that were not probed because they are offline.
+	Offline []string `json:"offline,omitempty"`
+	// Shared lists devices shared in from another tailnet, which belong to
+	// someone else and are never probed.
+	Shared []string `json:"shared,omitempty"`
 }
 
 // DegradedNote is printed with every report and baseline from the local
@@ -139,6 +155,9 @@ func (r Report) WriteJSON(w io.Writer) error {
 // WriteTable writes the human-readable report.
 func (r Report) WriteTable(w io.Writer) error {
 	head := fmt.Sprintf("tailnet-sentry scan  source: %s", r.Source)
+	if r.Probe != nil {
+		head = fmt.Sprintf("tailnet-sentry probe  from: %s  source: %s  %d connections", Clean(r.Probe.From), r.Source, r.Probe.Attempts)
+	}
 	if r.Baseline != nil {
 		head += fmt.Sprintf("  baseline: %s (%d devices)", r.Baseline.CreatedAt.Format(time.DateOnly), r.Baseline.Devices)
 	}
@@ -186,12 +205,23 @@ func (r Report) WriteTable(w io.Writer) error {
 		line += fmt.Sprintf(", %d quarantined", s.Quarantined)
 	}
 	fmt.Fprintln(w, line+".")
-	if s.Tailnet > 0 {
+	if s.Tailnet > 0 && r.Probe == nil {
 		fmt.Fprintf(w, "Tailnet configuration: %d %s (policy, keys, DNS or users); isolating a device will not undo these.\n",
 			s.Tailnet, plural(s.Tailnet, "finding", "findings"))
 	}
 	if len(r.Unread) > 0 {
 		fmt.Fprintf(w, "Not checked (the credential cannot read them): %s.\n", strings.Join(r.Unread, ", "))
+	}
+	if r.Probe != nil {
+		if len(r.Probe.Offline) > 0 {
+			fmt.Fprintf(w, "Not probed (offline): %s.\n", Clean(strings.Join(r.Probe.Offline, ", ")))
+		}
+		if len(r.Probe.Shared) > 0 {
+			fmt.Fprintf(w, "Not probed (shared in from another tailnet): %s.\n", Clean(strings.Join(r.Probe.Shared, ", ")))
+		}
+		// An answering port is fixed by the policy, a firewall or a bind on
+		// that peer, not by quarantining it.
+		return nil
 	}
 	for _, d := range r.Devices {
 		if d.Status == StatusAnomaly && d.Severity == rules.High {

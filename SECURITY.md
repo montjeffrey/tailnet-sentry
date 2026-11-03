@@ -13,10 +13,18 @@ The project is pre-release; fixes go to `main`.
 
 tailnet-sentry is a defensive tool for **one tailnet: the operator's own**. It
 reads from exactly two places, the Tailscale API at `api.tailscale.com` and
-the local `tailscaled` through the `tailscale` CLI, and it never sends a packet
-to any device and never probes a port. The API endpoint is a compile-time
-constant, not a flag or an environment variable, because anything able to
-redirect API calls would also redirect the credential that authenticates them.
+the local `tailscaled` through the `tailscale` CLI. `scan`, `baseline`,
+`isolate` and `release` never send a packet to any device and never probe a
+port. The API endpoint is a compile-time constant, not a flag or an
+environment variable, because anything able to redirect API calls would also
+redirect the credential that authenticates them.
+
+The exception is `sentry probe`, which runs only when the operator invokes it.
+It opens a TCP connection from the device it runs on to each online peer in
+the inventory, on a configured port list, and closes it without sending data.
+It refuses any address outside the Tailscale ranges (`100.64.0.0/10`,
+`fd7a:115c:a1e0::/48`), skips the device it runs on and devices shared in
+from another tailnet, and needs no credential.
 
 The only other outbound connection is the optional webhook, to a URL the
 operator configures. It carries the scan report (device metadata and
@@ -50,7 +58,10 @@ redirects are refused.
   `devices:core:read` for the device list, one token each for
   `policy_file:read`, `auth_keys:read`, `dns:read` and `users:read` when scan
   and baseline read the control plane, and `devices:core` only for
-  `isolate --apply` and `release --apply`. Tokens live in memory only. A scope
+  `isolate --apply` and `release --apply`. The pinned policy tests
+  (`POST /acl/validate`, which evaluates a policy and saves nothing) and the
+  isolate residual report use a `policy_file:read` token; sentry never asks
+  for the write scope `policy_file`. Tokens live in memory only. A scope
   the client lacks makes that section unknown, never an error; it is a finding
   (`control-unreadable`) only once the baseline records that section.
 - The key list is read for key metadata (ID, type, dates, capabilities). The
