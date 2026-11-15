@@ -354,7 +354,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 
 	now := d.now()
 	findings := rules.Evaluate(inv, &base, cfg, now)
-	findings = withoutIsolatedNewDevices(inv, findings, c.auditPath())
+	findings = downgradeIsolatedNewDevices(inv, findings, c.auditPath())
 	rep := report.Build(inv, &base, findings, version, now)
 	rep.Rules = rulesInfo
 	if c.json {
@@ -384,13 +384,16 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	return exitClean, nil
 }
 
-// withoutIsolatedNewDevices drops the new-device finding for a device that is
-// tagged only tag:quarantine and that sentry's own audit log shows it
-// isolating (and not since released): the operator contained it, and a scan
-// that kept calling it new would never go quiet. A quarantined device the
-// baseline never saw and the log does not explain stays reported, and so does
-// every device when the log fails verification.
-func withoutIsolatedNewDevices(inv inventory.Inventory, findings []rules.Finding, auditPath string) []rules.Finding {
+// downgradeIsolatedNewDevices lowers the new-device finding to low for a
+// device that is tagged only tag:quarantine and that sentry's audit log shows
+// it isolating (and not since released): the operator contained it, and a scan
+// that kept failing on it would never go quiet. The finding is never dropped.
+// The log is only chain-checked (no key, and the last line cannot be
+// verified), so whoever can append to it could claim a device was isolated;
+// that must not be able to hide the device, only to stop it failing a scan.
+// A log that fails verification, or has no open isolation of this device,
+// leaves the finding as it was.
+func downgradeIsolatedNewDevices(inv inventory.Inventory, findings []rules.Finding, auditPath string) []rules.Finding {
 	quarantined := map[string]bool{}
 	for _, dev := range inv.Devices {
 		if rules.Quarantined(dev) {
@@ -403,14 +406,16 @@ func withoutIsolatedNewDevices(inv inventory.Inventory, findings []rules.Finding
 	if _, err := audit.Verify(auditPath); err != nil {
 		return findings
 	}
-	var out []rules.Finding
-	for _, f := range findings {
-		if f.Rule == "new-device" && quarantined[f.DeviceID] {
-			if open, err := audit.OpenIsolation(auditPath, f.DeviceID); err == nil && open != nil {
-				continue
-			}
+	out := make([]rules.Finding, len(findings))
+	copy(out, findings)
+	for i, f := range out {
+		if f.Rule != "new-device" || !quarantined[f.DeviceID] {
+			continue
 		}
-		out = append(out, f)
+		if open, err := audit.OpenIsolation(auditPath, f.DeviceID); err == nil && open != nil {
+			out[i].Severity = rules.Low
+			out[i].Detail = "isolated by sentry on " + open.Since.Format(time.DateOnly) + " per audit log; " + f.Detail
+		}
 	}
 	return out
 }
