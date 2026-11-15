@@ -117,6 +117,10 @@ sentry baseline --source local --allow-partial   # review the list it prints: it
 sentry scan --source local                       # exit 0 = all healthy (of the devices it can see)
 ```
 
+`baseline` refuses an inventory with no devices (a wrong tailnet, a scoped-down key or an outage
+would otherwise make every later device "new"). Pass `--allow-empty` to record an empty baseline
+on purpose.
+
 With the API, which sees every device:
 
 ```bash
@@ -351,7 +355,10 @@ Two layers, of different strength:
   change the baseline on purpose. `baseline --accept` honours the same pin (`--baseline-sha256` or
   the environment variable) and refuses to change a baseline that does not match it, so a routine
   accept cannot re-seal a tampered file. Without a pin it cannot tell. `release` honours it too when it takes a device's tags from the baseline,
-  and refuses a baseline that fails its seal instead of treating it as "no record".
+  and refuses a baseline that fails its seal instead of treating it as "no record". A pin is an
+  error (exit 2) where it would not be checked: `release` with no baseline to check, and an explicit
+  `--baseline-sha256` on `baseline` without `--accept` (including with `--force`, `--reseal` or
+  `--digest`). The environment variable alone is not an error there, so it can stay set.
 
 Every `--json` report and webhook carries `baseline.sha256` and `baseline.sealed`, so a collector
 off the host sees a baseline change even if the host is lying.
@@ -366,7 +373,8 @@ it the same way:
   `rules.allowedTags` and `rules.allowedRoutes`. A collector off the host sees a rules change, and a
   clean scan says what it was told to ignore.
 - `--rules-sha256 <digest>` (or env `SENTRY_RULES_SHA256`) refuses a rules file with any other
-  digest (exit 2). It hashes the file's bytes, so any edit, even whitespace, needs a new pin.
+  digest (exit 2). It hashes the file's bytes, so any edit, even whitespace, needs a new pin. A rules
+  pin without `--rules` is an error (exit 2), not silently ignored.
 
 ## Threat model
 

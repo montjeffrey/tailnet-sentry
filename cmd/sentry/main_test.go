@@ -1080,3 +1080,65 @@ func TestQuarantinedNewDeviceKeepsItsSeverityWithoutAGoodIsolationRecord(t *test
 		})
 	}
 }
+
+// A pin that nothing checks must not look as if it protected anything.
+func TestPinsThatWouldBeIgnoredAreErrors(t *testing.T) {
+	t.Run("rules pin without a rules file", func(t *testing.T) {
+		h := newHarness(t)
+		h.mustBaseline()
+		code, _, errOut := h.run("scan", "--rules-sha256", strings.Repeat("0", 64))
+		if code != exitError || !strings.Contains(errOut, "--rules-sha256") {
+			t.Errorf("exit %d: %s", code, errOut)
+		}
+		h.env["SENTRY_RULES_SHA256"] = strings.Repeat("0", 64)
+		if code, _, errOut := h.run("scan"); code != exitError {
+			t.Errorf("env pin: exit %d: %s", code, errOut)
+		}
+	})
+	for _, extra := range [][]string{{"--force"}, {"--reseal"}, {"--digest"}, {}} {
+		t.Run("baseline pin with "+strings.Join(extra, " "), func(t *testing.T) {
+			h := newHarness(t)
+			h.mustBaseline()
+			args := append([]string{"baseline", "--baseline-sha256", strings.Repeat("0", 64)}, extra...)
+			code, _, errOut := h.run(args...)
+			if code != exitError || !strings.Contains(errOut, "--baseline-sha256 only applies to --accept") {
+				t.Errorf("exit %d: %s", code, errOut)
+			}
+		})
+	}
+	t.Run("env pin alone does not block baseline --force", func(t *testing.T) {
+		h := newHarness(t)
+		h.mustBaseline()
+		h.env["SENTRY_BASELINE_SHA256"] = strings.Repeat("0", 64)
+		if code, _, errOut := h.run("baseline", "--force"); code != exitClean {
+			t.Errorf("exit %d: %s", code, errOut)
+		}
+	})
+	t.Run("release pin with no baseline", func(t *testing.T) {
+		h := newHarness(t)
+		d := intruder()
+		d["tags"] = []string{"tag:quarantine"}
+		h.api.add(d)
+		code, _, errOut := h.run("release", "kali", "--baseline-sha256", strings.Repeat("0", 64))
+		if code != exitError || !strings.Contains(errOut, "no baseline to check it against") {
+			t.Errorf("exit %d: %s", code, errOut)
+		}
+	})
+}
+
+func TestBaselineRefusesAnEmptyInventoryUnlessAllowed(t *testing.T) {
+	h := newHarness(t)
+	h.api.mu.Lock()
+	h.api.devices = []apiDev{}
+	h.api.mu.Unlock()
+	code, _, errOut := h.run("baseline")
+	if code != exitError || !strings.Contains(errOut, "--allow-empty") {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(h.stateDir, "baseline.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a baseline was written: %v", err)
+	}
+	if code, _, errOut := h.run("baseline", "--allow-empty"); code != exitClean {
+		t.Errorf("--allow-empty: exit %d: %s", code, errOut)
+	}
+}
