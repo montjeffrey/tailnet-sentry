@@ -341,7 +341,9 @@ Two layers, of different strength:
 
   Keep the digest in the scheduler's configuration or a password manager, not next to the baseline.
   `baseline`, `baseline --accept` and `--reseal` print the new digest; update the pin when you
-  change the baseline on purpose.
+  change the baseline on purpose. `baseline --accept` honours the same pin (`--baseline-sha256` or
+  the environment variable) and refuses to change a baseline that does not match it, so a routine
+  accept cannot re-seal a tampered file. Without a pin it cannot tell.
 
 Every `--json` report and webhook carries `baseline.sha256` and `baseline.sealed`, so a collector
 off the host sees a baseline change even if the host is lying.

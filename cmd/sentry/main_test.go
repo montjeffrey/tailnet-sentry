@@ -868,3 +868,41 @@ func TestQuarantineTagDoesNotHideAnUnbaselinedOrRoutingDevice(t *testing.T) {
 		t.Errorf("isolated router still routing: exit %d\n%s", code, out)
 	}
 }
+
+func TestAcceptHonoursThePin(t *testing.T) {
+	h := newHarness(t)
+	_, out, _ := h.run("baseline")
+	pin := digestFrom(t, out)
+
+	// With a matching pin, accept works.
+	h.api.add(intruder())
+	code, out, errOut := h.run("baseline", "--accept", "kali", "--baseline-sha256", pin)
+	if code != exitClean || !strings.Contains(out, "Added kali") {
+		t.Fatalf("accept with the right pin: exit %d, %s%s", code, out, errOut)
+	}
+
+	// Someone who can write the state directory edits the baseline and
+	// reseals it. The pin, held elsewhere, makes the routine accept refuse
+	// instead of re-sealing (and so blessing) the tampered file.
+	h = newHarness(t)
+	_, out, _ = h.run("baseline")
+	pin = digestFrom(t, out)
+	h.tamper()
+	if code, _, _ := h.run("baseline", "--reseal"); code != exitClean {
+		t.Fatal("reseal failed")
+	}
+	before, err := os.ReadFile(h.baselineFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.api.add(intruder())
+	h.env["SENTRY_BASELINE_SHA256"] = pin
+	code, out, errOut = h.run("baseline", "--accept", "kali")
+	if code != exitError || !strings.Contains(errOut, "pinned") || strings.Contains(out, "Added") {
+		t.Errorf("accept against a tampered baseline: exit %d, %s%s", code, out, errOut)
+	}
+	after, err := os.ReadFile(h.baselineFile())
+	if err != nil || string(after) != string(before) {
+		t.Errorf("the baseline was modified despite the pin mismatch (%v)", err)
+	}
+}
