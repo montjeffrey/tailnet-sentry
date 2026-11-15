@@ -129,6 +129,36 @@ func TestListDevicesMapsEveryField(t *testing.T) {
 	}
 }
 
+func TestListDevicesRejectsAResponseWithoutADeviceList(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing key": `{}`,
+		"null":        `{"devices":null}`,
+		"other key":   `{"nodes":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			_, err := keyClient(srv).ListDevices(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "no devices list") {
+				t.Fatalf("want a no-devices-list error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestListDevicesAcceptsAnEmptyList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"devices":[]}`)
+	}))
+	defer srv.Close()
+	inv, err := keyClient(srv).ListDevices(context.Background())
+	if err != nil || len(inv.Devices) != 0 {
+		t.Fatalf("empty list: %v, %d devices", err, len(inv.Devices))
+	}
+}
+
 func TestListDevicesEscapesTailnet(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
