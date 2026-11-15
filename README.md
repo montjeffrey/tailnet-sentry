@@ -349,7 +349,8 @@ Two layers, of different strength:
   `baseline`, `baseline --accept` and `--reseal` print the new digest; update the pin when you
   change the baseline on purpose. `baseline --accept` honours the same pin (`--baseline-sha256` or
   the environment variable) and refuses to change a baseline that does not match it, so a routine
-  accept cannot re-seal a tampered file. Without a pin it cannot tell.
+  accept cannot re-seal a tampered file. Without a pin it cannot tell. `release` honours it too when it takes a device's tags from the baseline,
+  and refuses a baseline that fails its seal instead of treating it as "no record".
 
 Every `--json` report and webhook carries `baseline.sha256` and `baseline.sealed`, so a collector
 off the host sees a baseline change even if the host is lying.
