@@ -97,7 +97,7 @@ func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Fi
 		row := DeviceStatus{ID: d.ID, Name: d.ShortName(), Owner: d.Owner, OS: d.OS, Tags: d.Tags, Online: d.Online}
 		fs := byDevice[d.ID]
 		switch sev := rules.Severest(fs); {
-		case rules.Quarantined(d):
+		case rules.Quarantined(d) && len(fs) == 0:
 			row.Status = StatusQuarantined
 			r.Summary.Quarantined++
 		case len(fs) == 0:

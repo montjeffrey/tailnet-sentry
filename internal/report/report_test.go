@@ -123,3 +123,14 @@ func TestHeadline(t *testing.T) {
 		t.Errorf("Headline = %q", got)
 	}
 }
+
+func TestQuarantinedDeviceWithFindingsIsNotShownAsQuarantined(t *testing.T) {
+	inv := inventory.Inventory{Source: inventory.SourceAPI, Devices: []inventory.Device{
+		{ID: "nOLD", Name: "old.example.ts.net", Tags: []string{rules.QuarantineTag}, Authorized: true},
+	}}
+	findings := []rules.Finding{{Rule: "quarantined-still-routing", Severity: rules.Medium, DeviceID: "nOLD", Device: "old", Detail: "x"}}
+	r := Build(inv, &baseline.Baseline{}, findings, "test", now)
+	if r.Devices[0].Status != StatusAnomaly || r.Summary.Quarantined != 0 || r.Summary.Anomalous != 1 {
+		t.Errorf("status %s, summary %+v", r.Devices[0].Status, r.Summary)
+	}
+}

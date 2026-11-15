@@ -275,7 +275,9 @@ func TestEvaluateFlagsOnlyTheAnomaly(t *testing.T) {
 	if got := Evaluate(inventory.Inventory{Devices: []inventory.Device{hiding}}, &baseline.Baseline{Devices: []baseline.Record{*laptopRecord()}}, DefaultConfig(), now); len(got) != 3 {
 		t.Errorf("a device with tag:quarantine plus tag:prod must be evaluated, got %+v", got)
 	}
-	base := baseline.Baseline{Devices: []baseline.Record{*laptopRecord()}}
+	// nOLD is a device sentry isolated earlier, so the baseline knows it.
+	old := baseline.Record{ID: "nOLD", Owner: "alice@github", OS: intruder.OS}
+	base := baseline.Baseline{Devices: []baseline.Record{*laptopRecord(), old}}
 
 	got := Evaluate(inv, &base, DefaultConfig(), now)
 	if len(got) != 2 {
@@ -388,5 +390,64 @@ func TestParseVersion(t *testing.T) {
 		if ok != tt.ok || got != tt.want {
 			t.Errorf("parseVersion(%q) = %v, %v", tt.in, got, ok)
 		}
+	}
+}
+
+// A quarantined device is not a hiding place: the rules that stay true after
+// isolation still run on it.
+func TestQuarantinedDevicesStillGetTheRulesQuarantineDoesNotAnswer(t *testing.T) {
+	quarantined := func(mut func(*inventory.Device)) inventory.Device {
+		d := inventory.Device{ID: "nQ", Name: "q.example.ts.net", Owner: "mallory@example.com", OS: "linux",
+			Tags: []string{QuarantineTag}, Authorized: true, Online: true, KeyExpiryDisabled: true, ClientVersion: "1.50.0"}
+		if mut != nil {
+			mut(&d)
+		}
+		return d
+	}
+	known := baseline.Baseline{Devices: []baseline.Record{{ID: "nQ", Owner: "mallory@example.com", OS: "linux"}}}
+	unknown := baseline.Baseline{}
+	rulesFor := func(d inventory.Device, base baseline.Baseline, cfg Config) []string {
+		var ids []string
+		for _, f := range Evaluate(inventory.Inventory{Devices: []inventory.Device{d}}, &base, cfg, now) {
+			ids = append(ids, f.Rule)
+		}
+		return ids
+	}
+	cases := []struct {
+		name string
+		dev  inventory.Device
+		base baseline.Baseline
+		cfg  Config
+		want string // comma-joined rule IDs
+	}{
+		{"contained and known is quiet", quarantined(nil), known, DefaultConfig(), ""},
+		{"deauthorized router is quiet", quarantined(func(d *inventory.Device) {
+			d.Authorized, d.EnabledRoutes = false, []string{"10.0.0.0/8"}
+		}), known, DefaultConfig(), ""},
+		{"not in the baseline", quarantined(nil), unknown, DefaultConfig(), "new-device"},
+		{"still routing", quarantined(func(d *inventory.Device) { d.EnabledRoutes = []string{"192.168.1.0/24"} }),
+			known, DefaultConfig(), "quarantined-still-routing"},
+		{"still an exit node", quarantined(func(d *inventory.Device) { d.AdvertisedRoutes = []string{"0.0.0.0/0", "::/0"} }),
+			known, DefaultConfig(), "quarantined-still-routing"},
+		{"cloned node key", quarantined(func(d *inventory.Device) { d.MultipleConnections = true }),
+			known, DefaultConfig(), "multiple-connections"},
+		{"rule can still be disabled", quarantined(nil), unknown, func() Config {
+			c := DefaultConfig()
+			c.Disabled = []string{"new-device"}
+			return c
+		}(), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(rulesFor(tc.dev, tc.base, tc.cfg), ","); got != tc.want {
+				t.Errorf("rules fired = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// The new rule never fires on a device that is not quarantined.
+	d := laptop()
+	d.EnabledRoutes = []string{"192.168.1.0/24"}
+	if got := QuarantinedStillRouting(env(), d, laptopRecord()); got != nil {
+		t.Errorf("fired on a device without the quarantine tag: %v", got)
 	}
 }

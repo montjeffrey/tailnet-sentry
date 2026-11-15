@@ -39,10 +39,10 @@ const QuarantineTag = "tag:quarantine"
 
 // Quarantined reports whether d carries tag:quarantine and nothing else,
 // which is exactly the state isolate leaves it in. Such a device has been
-// dealt with and can reach nothing under the example policy, so the rules
-// skip it. A device that has tag:quarantine alongside other tags still gets
-// whatever those tags allow, so it is evaluated like any other: the tag
-// must not become a way to hide.
+// dealt with and can reach nothing under the example policy, so most rules
+// skip it (see afterQuarantine for the ones that do not). A device that has
+// tag:quarantine alongside other tags still gets whatever those tags allow,
+// so it is evaluated like any other: the tag must not become a way to hide.
 func Quarantined(d inventory.Device) bool {
 	return len(d.Tags) == 1 && d.Tags[0] == QuarantineTag
 }
@@ -112,6 +112,7 @@ func All() []Rule {
 		{"unexpected-tags", High, "device carries tags it did not have", UnexpectedTags},
 		{"unexpected-routes", High, "device advertises subnet routes it did not have", UnexpectedRoutes},
 		{"exit-node", High, "device newly offers itself as an exit node", ExitNode},
+		{"quarantined-still-routing", Medium, "a quarantined device is still authorized and routing or an exit node", QuarantinedStillRouting},
 		{"key-expired", High, "node key has expired", KeyExpired},
 		{"key-expiry-disabled", Medium, "node key was set never to expire", KeyExpiryDisabled},
 		{"key-expiring", Medium, "node key expires soon", KeyExpiring},
@@ -122,7 +123,18 @@ func All() []Rule {
 	}
 }
 
-// Evaluate runs every enabled rule on every device except quarantined ones.
+// afterQuarantine are the rules that still run on a device whose only tag is
+// tag:quarantine, because the tag does not make them untrue: a quarantined
+// device the baseline never saw was not isolated by sentry, and one with
+// cloned node state or live routes is not contained.
+var afterQuarantine = map[string]bool{
+	"new-device":                true,
+	"multiple-connections":      true,
+	"quarantined-still-routing": true,
+}
+
+// Evaluate runs every enabled rule on every device. A quarantined device is
+// held to the afterQuarantine rules only.
 func Evaluate(inv inventory.Inventory, base *baseline.Baseline, cfg Config, now time.Time) []Finding {
 	env := NewEnv(cfg, base, now)
 	disabled := map[string]bool{}
@@ -131,15 +143,13 @@ func Evaluate(inv inventory.Inventory, base *baseline.Baseline, cfg Config, now 
 	}
 	var out []Finding
 	for _, d := range inv.Devices {
-		if Quarantined(d) {
-			continue
-		}
+		quarantined := Quarantined(d)
 		var known *baseline.Record
 		if base != nil {
 			known = base.Lookup(d.ID)
 		}
 		for _, r := range All() {
-			if disabled[r.ID] {
+			if disabled[r.ID] || (quarantined && !afterQuarantine[r.ID]) {
 				continue
 			}
 			for _, detail := range r.Check(env, d, known) {
@@ -256,6 +266,16 @@ func ExitNode(env Env, d inventory.Device, known *baseline.Record) []string {
 		return nil
 	}
 	return []string{"advertises itself as an exit node"}
+}
+
+// QuarantinedStillRouting fires for a device whose only tag is tag:quarantine
+// but which is still authorized and has approved routes or offers itself as
+// an exit node. Tags do not revoke routes, so such a device keeps forwarding.
+func QuarantinedStillRouting(_ Env, d inventory.Device, _ *baseline.Record) []string {
+	if !Quarantined(d) || !d.Authorized || (len(d.EnabledRoutes) == 0 && !d.ExitNode()) {
+		return nil
+	}
+	return []string{"quarantined, but still authorized and routing or an exit node: deauthorize it or revoke its routes"}
 }
 
 // KeyExpired fires once a node key's expiry has passed. Like the other key
