@@ -747,6 +747,35 @@ func TestReleaseTagSources(t *testing.T) {
 			t.Errorf("exit %d\n%s", code, out)
 		}
 	})
+	t.Run("a baseline that fails its seal or its pin is not trusted for tags", func(t *testing.T) {
+		h := newHarness(t)
+		h.api.add(intruder())
+		_, out, _ := h.run("baseline")
+		pin := digestFrom(t, out)
+		h.api.mu.Lock()
+		h.api.devices[2] = quarantined()
+		h.api.mu.Unlock()
+		h.tamper()
+		code, out, errOut := h.run("release", "kali")
+		if code != exitError || !strings.Contains(errOut, "integrity check") || strings.Contains(out, "set tags") {
+			t.Errorf("tampered baseline: exit %d, %s%s", code, out, errOut)
+		}
+		if code, _, _ := h.run("baseline", "--reseal"); code != exitClean {
+			t.Fatal("reseal failed")
+		}
+		code, out, errOut = h.run("release", "kali", "--baseline-sha256", pin)
+		if code != exitError || !strings.Contains(errOut, "pinned") || strings.Contains(out, "set tags") {
+			t.Errorf("resealed but pinned: exit %d, %s%s", code, out, errOut)
+		}
+	})
+	t.Run("no baseline at all is still just no recorded tags", func(t *testing.T) {
+		h := newHarness(t)
+		h.api.add(quarantined())
+		code, out, errOut := h.run("release", "kali")
+		if code != exitClean || !strings.Contains(out, "taken from none recorded") {
+			t.Errorf("exit %d, %s%s", code, out, errOut)
+		}
+	})
 	t.Run("--restore-tags wins", func(t *testing.T) {
 		h := newHarness(t)
 		h.api.add(quarantined())

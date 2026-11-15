@@ -630,6 +630,8 @@ func cmdRelease(ctx context.Context, args []string, d deps) error {
 	a.register(fs, d)
 	restore := fs.String("restore-tags", "", "comma-separated tags to restore, overriding the audit log and baseline")
 	reauth := fs.Bool("reauthorize", false, "authorize the device even if sentry has no record of deauthorizing it")
+	pin := fs.String("baseline-sha256", d.getenv("SENTRY_BASELINE_SHA256"),
+		"refuse to take tags from a baseline that does not have this sha256 (env SENTRY_BASELINE_SHA256)")
 	pos, err := parse(fs, args)
 	if err != nil {
 		return err
@@ -687,7 +689,20 @@ func cmdRelease(ctx context.Context, args []string, d deps) error {
 	case open != nil:
 		restoreTags, source = open.PreviousTags, "the audit log (isolated "+open.Since.Format(time.DateOnly)+")"
 	default:
-		if base, err := baseline.Load(a.baselinePath()); err == nil {
+		// The baseline's tags would be applied to the device, so a baseline
+		// that fails its seal or the pin is an error, not "no record". Only a
+		// baseline that does not exist is.
+		base, err := baseline.Load(a.baselinePath())
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return err
+		default:
+			if *pin != "" {
+				if err := base.CheckPin(*pin); err != nil {
+					return err
+				}
+			}
 			if rec := base.Lookup(target.ID); rec != nil {
 				restoreTags, source = rec.Tags, "the baseline"
 			}
