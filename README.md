@@ -330,7 +330,9 @@ Two layers, of different strength:
   that fails it (exit 2), which catches corruption and hand edits. It does **not** stop someone who
   can write the file from recomputing the seal. After an edit you made on purpose, run
   `sentry baseline --reseal`; it prints the old and new digests. Baselines written before seals
-  existed still load, with a note on stderr.
+  existed still load, with a note on stderr, and so does one whose `sha256` field was deleted: the
+  seal is a check against accidents, and only the pin below also catches a deliberate edit,
+  including a removed seal.
 - **Pin (you opt in).** Record the digest where the state directory's writers cannot reach, and
   `scan` will refuse any other baseline, even a correctly resealed one:
 
