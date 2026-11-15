@@ -82,6 +82,10 @@ From source (Go 1.26+):
 go install github.com/montjeffrey/tailnet-sentry/cmd/sentry@latest
 ```
 
+Go 1.26 is the minimum to run the command, but `go.mod` pins a newer toolchain (the `toolchain` line)
+and releases and CI are built with exactly that one. Go 1.26 and later download it on first use
+unless you set `GOTOOLCHAIN=local`, in which case you build with whatever Go you have.
+
 Or download a [release](https://github.com/montjeffrey/tailnet-sentry/releases) binary and verify
 it. Run these in the folder you download to; pick your platform's file (`sentry-linux-amd64`,
 `sentry-darwin-arm64`, `sentry-windows-amd64.exe`, ...):
