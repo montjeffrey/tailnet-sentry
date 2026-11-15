@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,8 @@ import (
 	"testing"
 	"time"
 )
+
+var fakeClientSecret = testkeys.Fake("client", "goodsecret")
 
 // fakeAPI is an httptest stand-in for api.tailscale.com. It serves the
 // recorded device list and records every write, so tests can assert exactly
@@ -45,7 +48,7 @@ func newFakeAPI(t *testing.T) (*fakeAPI, *httptest.Server) {
 func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/oauth/token" {
 		_ = r.ParseForm()
-		if r.PostForm.Get("client_secret") != "tskey-client-goodsecret" || r.PostForm.Get("grant_type") != "client_credentials" {
+		if r.PostForm.Get("client_secret") != fakeClientSecret || r.PostForm.Get("grant_type") != "client_credentials" {
 			http.Error(w, `{"message":"invalid client"}`, http.StatusUnauthorized)
 			return
 		}
@@ -54,7 +57,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		n := f.tokens.Add(1)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"access_token": "tskey-api-oauthtoken" + string(rune('0'+n)),
+			"access_token": testkeys.Fake("api", "oauthtoken") + string(rune('0'+n)),
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 			"scope":        r.PostForm.Get("scope"),
@@ -62,7 +65,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer tskey-") {
+	if !strings.HasPrefix(auth, "Bearer "+testkeys.Prefix) {
 		http.Error(w, `{"message":"unauthorized"}`, http.StatusUnauthorized)
 		return
 	}
@@ -200,7 +203,7 @@ func TestSetTagsAndAuthorizedBodies(t *testing.T) {
 
 func TestOAuthExchangesAndCachesScopedToken(t *testing.T) {
 	f, srv := newFakeAPI(t)
-	creds := Credentials{ClientID: "kCLIENT", ClientSecret: NewSecret("tskey-client-goodsecret")}
+	creds := Credentials{ClientID: "kCLIENT", ClientSecret: NewSecret(fakeClientSecret)}
 	c := New(creds, "-", ScopeRead, Options{BaseURL: srv.URL})
 	for i := 0; i < 3; i++ {
 		if _, err := c.ListDevices(context.Background()); err != nil {
@@ -292,7 +295,7 @@ func TestTransportErrorIsRedacted(t *testing.T) {
 
 func TestRejectedOAuthTokenIsDropped(t *testing.T) {
 	f, srv := newFakeAPI(t)
-	creds := Credentials{ClientID: "kCLIENT", ClientSecret: NewSecret("tskey-client-goodsecret")}
+	creds := Credentials{ClientID: "kCLIENT", ClientSecret: NewSecret(fakeClientSecret)}
 	c := New(creds, "-", ScopeRead, Options{BaseURL: srv.URL})
 	if _, err := c.ListDevices(context.Background()); err != nil {
 		t.Fatal(err)

@@ -2,6 +2,7 @@ package tsutil
 
 import (
 	"context"
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -161,7 +162,7 @@ func TestSubprocessGetsMinimalEnvironment(t *testing.T) {
 	dir := t.TempDir()
 	useTrusted(t, writeFakeTailscale(t, dir, "nINSTALLED"))
 	t.Setenv("SENTRY_WEBHOOK", "https://hooks.example.invalid/not-a-real-secret")
-	t.Setenv("TS_API_KEY", "tskey-api-should-not-pass")
+	t.Setenv("TS_API_KEY", testkeys.Fake("api", "should-not-pass"))
 	if _, _, err := Inventory(context.Background()); err != nil {
 		t.Fatal(err)
 	}

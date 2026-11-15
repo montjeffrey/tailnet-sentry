@@ -3,11 +3,12 @@ package tsapi
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"strings"
 	"testing"
 )
 
-const fakeKey = "tskey-api-kFAKE0000CNTRL-NotARealSecretValue0000"
+var fakeKey = testkeys.Fake("api", "kFAKE0000CNTRL-NotARealSecretValue0000")
 
 func envOf(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
@@ -22,7 +23,7 @@ func TestFromEnv(t *testing.T) {
 	}{
 		{"none", nil, false, true},
 		{"api key", map[string]string{EnvAPIKey: fakeKey}, false, false},
-		{"oauth", map[string]string{EnvOAuthClientID: "kID", EnvOAuthClientSecret: "tskey-client-x"}, true, false},
+		{"oauth", map[string]string{EnvOAuthClientID: "kID", EnvOAuthClientSecret: testkeys.Fake("client", "x")}, true, false},
 		{"oauth wins over key", map[string]string{EnvAPIKey: fakeKey, EnvOAuthClientID: "kID", EnvOAuthClientSecret: "s"}, true, false},
 		{"half an oauth client", map[string]string{EnvOAuthClientID: "kID"}, false, true},
 		{"whitespace only", map[string]string{EnvAPIKey: "  "}, false, true},
@@ -67,7 +68,7 @@ func TestRedact(t *testing.T) {
 	custom := NewSecret("hunter2-custom-secret")
 	tests := []struct{ in, want string }{
 		{"bad token " + fakeKey + " rejected", "bad token [redacted] rejected"},
-		{"other key tskey-auth-abc123-DEF was echoed", "other key [redacted] was echoed"},
+		{"other key " + testkeys.Fake("auth", "abc123-DEF") + " was echoed", "other key [redacted] was echoed"},
 		{"mentions hunter2-custom-secret here", "mentions [redacted] here"},
 		{"nothing secret", "nothing secret"},
 	}
