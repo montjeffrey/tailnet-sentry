@@ -2,10 +2,15 @@ package report
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/montjeffrey/tailnet-sentry/internal/baseline"
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
@@ -113,6 +118,51 @@ func TestHostileHostnameCannotHideInTable(t *testing.T) {
 	if strings.ContainsRune(buf.String(), '\x1b') {
 		t.Error("escape sequence reached the terminal")
 	}
+}
+
+// Format characters (bidi overrides, zero-width and tag characters) are
+// escaped in JSON as they are scrubbed in the table, so a consumer that shows
+// the strings cannot be fooled by a hostile hostname.
+func TestJSONEscapesFormatCharacters(t *testing.T) {
+	hostile := "evil\u202egnp.example.ts.net\u200b\U000e0041\u0085"
+	inv := inventory.Inventory{Source: inventory.SourceAPI, Devices: []inventory.Device{
+		{ID: "nX", Name: hostile, Owner: "m\u2066@x"},
+	}}
+	f := []rules.Finding{{Rule: "new-device", Severity: rules.High, DeviceID: "nX", Device: hostile, Detail: "owner m\u2066@x"}}
+	rep := Build(inv, nil, f, "t", now)
+
+	var buf bytes.Buffer
+	if err := rep.WriteJSON(&buf); err != nil {
+		t.Fatal(err)
+	}
+	checkEscaped := func(what string, b []byte) {
+		t.Helper()
+		for _, r := range string(b) {
+			if r >= 0x80 && (unicode.Is(unicode.Cf, r) || unicode.IsControl(r)) {
+				t.Errorf("%s carries the raw character U+%04X:\n%s", what, r, b)
+			}
+		}
+		for _, want := range []string{`\u202e`, `\u200b`, `\u2066`, `\u0085`, `\udb40\udc41`} {
+			if !strings.Contains(string(b), want) {
+				t.Errorf("%s lacks the escape %s:\n%s", what, want, b)
+			}
+		}
+	}
+	checkEscaped("--json", buf.Bytes())
+
+	// The escaped output still decodes to the original text.
+	var back Report
+	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || back.Devices[0].Name != "evil\u202egnp" {
+		t.Errorf("round trip: %v, name %q", err, back.Devices[0].Name)
+	}
+
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { body, _ = io.ReadAll(r.Body) }))
+	defer srv.Close()
+	if err := PostWebhook(context.Background(), srv.Client(), srv.URL, rep); err != nil {
+		t.Fatal(err)
+	}
+	checkEscaped("webhook", body)
 }
 
 func TestHeadline(t *testing.T) {

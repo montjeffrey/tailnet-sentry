@@ -3,6 +3,7 @@
 package report
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"text/tabwriter"
 	"time"
 	"unicode"
+	"unicode/utf16"
 
 	"github.com/montjeffrey/tailnet-sentry/internal/baseline"
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
@@ -131,9 +133,37 @@ func Build(inv inventory.Inventory, base *baseline.Baseline, findings []rules.Fi
 
 // WriteJSON writes the report as indented JSON.
 func (r Report) WriteJSON(w io.Writer) error {
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
-	return enc.Encode(r)
+	if err := enc.Encode(r); err != nil {
+		return err
+	}
+	_, err := w.Write(escapeFormat(buf.Bytes()))
+	return err
+}
+
+// escapeFormat rewrites every raw non-ASCII control and format character in
+// encoded JSON as a \u escape. The encoder escapes only ASCII controls (and
+// U+2028, U+2029), but device names and owners are chosen by whoever controls
+// the device, and a bidi override or zero-width character in a field a
+// consumer displays can reorder or hide text. Non-ASCII characters in encoded
+// JSON can only be inside strings, so this only touches string contents.
+func escapeFormat(b []byte) []byte {
+	var out bytes.Buffer
+	out.Grow(len(b))
+	for _, r := range string(b) {
+		switch {
+		case r < 0x80 || !(unicode.IsControl(r) || unicode.Is(unicode.Cf, r)):
+			out.WriteRune(r)
+		case r > 0xFFFF:
+			hi, lo := utf16.EncodeRune(r)
+			fmt.Fprintf(&out, `\u%04x\u%04x`, hi, lo)
+		default:
+			fmt.Fprintf(&out, `\u%04x`, r)
+		}
+	}
+	return out.Bytes()
 }
 
 // WriteTable writes the human-readable report.
