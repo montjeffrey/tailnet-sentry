@@ -59,6 +59,12 @@ redirects are refused.
 | `<state-dir>/audit.jsonl` | every isolate and release, dry runs included | 0600, opened O_APPEND, hash-chained |
 | `<state-dir>/audit.jsonl.lock` | empty; an OS lock on it serialises appends | 0600 |
 
+The rules file (`--rules`) is read, never written, but it can disable rules and
+allow-list owners, tags and routes, so it is as sensitive as the baseline. Every
+scan that uses one reports its sha256 and what it silences, in the table, the
+JSON and the webhook, and `--rules-sha256` (or `SENTRY_RULES_SHA256`) refuses a
+file with any other digest. Keep the file, and the pin, off the state directory.
+
 The audit chain is tamper-evident, not tamper-proof: a changed, removed or
 inserted line is detected, except at the very end of the file, and someone
 who can rewrite the whole file can rebuild a valid chain. `release` reads the

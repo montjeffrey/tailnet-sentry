@@ -906,3 +906,52 @@ func TestAcceptHonoursThePin(t *testing.T) {
 		t.Errorf("the baseline was modified despite the pin mismatch (%v)", err)
 	}
 }
+
+func TestRulesFileIsReportedAndCanBePinned(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.add(intruder())
+	rulesPath := filepath.Join(t.TempDir(), "rules.json")
+	writeRules := func(body string) {
+		if err := os.WriteFile(rulesPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeRules(`{"allowedTags":["tag:ci"]}`)
+
+	code, out, _ := h.run("scan", "--rules", rulesPath, "--json")
+	var rep struct {
+		Rules struct {
+			SHA256      string
+			Disabled    []string
+			AllowedTags []string
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil || code != exitAnomalies {
+		t.Fatalf("exit %d: %v\n%s", code, err, out)
+	}
+	if len(rep.Rules.SHA256) != 64 || len(rep.Rules.AllowedTags) != 1 || len(rep.Rules.Disabled) != 0 {
+		t.Errorf("rules block = %+v", rep.Rules)
+	}
+	pin := rep.Rules.SHA256
+	if code, _, errOut := h.run("scan", "--rules", rulesPath, "--rules-sha256", pin); code != exitAnomalies {
+		t.Fatalf("pinned rules file: exit %d, %s", code, errOut)
+	}
+
+	// The intruder's owner and tag are silenced by an edited rules file: the
+	// baseline pin still passes, but the rules pin does not.
+	writeRules(`{"allowedOwners":["mallory@example.com"],"allowedTags":["tag:ci"],"disabled":["new-device"]}`)
+	h.env["SENTRY_RULES_SHA256"] = pin
+	code, out, errOut := h.run("scan", "--rules", rulesPath)
+	if code != exitError || !strings.Contains(errOut, "pinned") || strings.Contains(out, "healthy") {
+		t.Errorf("edited rules file against its pin: exit %d\n%s%s", code, out, errOut)
+	}
+	// Unpinned, the scan goes quiet but says what it was told to ignore.
+	delete(h.env, "SENTRY_RULES_SHA256")
+	code, out, _ = h.run("scan", "--rules", rulesPath)
+	for _, want := range []string{"disabled rules: new-device", "allowed owners: mallory@example.com", "allowed tags: tag:ci"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("silenced scan (exit %d) does not say %q:\n%s", code, want, out)
+		}
+	}
+}

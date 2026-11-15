@@ -2,10 +2,13 @@ package rules
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 )
 
 // Config tunes the rules. Everything is optional: with no config file the
@@ -45,20 +48,42 @@ func DefaultConfig() Config {
 // LoadConfig reads a JSON config. Unknown fields are an error, so a typo
 // such as "alowedTags" fails loudly instead of silently accepting nothing.
 func LoadConfig(path string) (Config, error) {
+	cfg, _, err := LoadConfigDigest(path)
+	return cfg, err
+}
+
+// LoadConfigDigest is LoadConfig that also returns the hex SHA-256 of the
+// file's bytes, read once, so what is pinned is exactly what is parsed. The
+// config can disable rules and allow-list owners, tags and routes, so it
+// needs the same protection as the baseline.
+func LoadConfigDigest(path string) (Config, string, error) {
 	cfg := DefaultConfig()
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Config{}, err
+		return Config{}, "", err
 	}
+	sum := sha256.Sum256(data)
+	digest := hex.EncodeToString(sum[:])
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
-		return Config{}, fmt.Errorf("rules config %s: %w", path, err)
+		return Config{}, "", fmt.Errorf("rules config %s: %w", path, err)
 	}
 	if err := cfg.Validate(); err != nil {
-		return Config{}, fmt.Errorf("rules config %s: %w", path, err)
+		return Config{}, "", fmt.Errorf("rules config %s: %w", path, err)
 	}
-	return cfg, nil
+	return cfg, digest, nil
+}
+
+// CheckPin compares a rules file's digest with one the operator recorded
+// outside the state directory. A leading "sha256:" and upper case are
+// accepted, as for the baseline pin.
+func CheckPin(digest, pin string) error {
+	want := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(pin)), "sha256:")
+	if digest != want {
+		return fmt.Errorf("the rules file does not match the pinned sha256: pinned %s, file is %s", want, digest)
+	}
+	return nil
 }
 
 // Validate checks values that would otherwise make a rule silently useless.

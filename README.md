@@ -348,6 +348,18 @@ Two layers, of different strength:
 Every `--json` report and webhook carries `baseline.sha256` and `baseline.sealed`, so a collector
 off the host sees a baseline change even if the host is lying.
 
+**The rules file needs the same protection.** `--rules` can disable any rule, including `new-device`
+and `unexpected-owner`, and allow-list owners, tags and routes, so whoever can edit it can silence a
+rogue device without touching the baseline or its pin. Keep it outside the state directory, and pin
+it the same way:
+
+- `scan --rules file.json` prints the file's sha256 and every disabled rule and allow-list entry,
+  and `--json` and the webhook carry them as `rules.sha256`, `rules.disabled`, `rules.allowedOwners`,
+  `rules.allowedTags` and `rules.allowedRoutes`. A collector off the host sees a rules change, and a
+  clean scan says what it was told to ignore.
+- `--rules-sha256 <digest>` (or env `SENTRY_RULES_SHA256`) refuses a rules file with any other
+  digest (exit 2). It hashes the file's bytes, so any edit, even whitespace, needs a new pin.
+
 ## Threat model
 
 **What it catches**
@@ -374,7 +386,8 @@ off the host sees a baseline change even if the host is lying.
   leak of *sentry's* credential can do, but not what a stolen admin account can.
 - **Tampering on the sentry host.** Someone who can write the state directory can edit the baseline
   to accept their device, and recompute its seal. Only a [pinned digest](#protecting-the-baseline)
-  kept off that host, or the digest in off-host reports, exposes that. The audit log is hash-chained: `sentry audit verify` detects a changed,
+  kept off that host, or the digest in off-host reports, exposes that. The same goes for the rules
+  file, which can disable rules or allow-list a device: pin it with `--rules-sha256`. The audit log is hash-chained: `sentry audit verify` detects a changed,
   removed or inserted line, except at the very end (truncating the tail, or editing the last line,
   leaves no trace), and not a full rewrite. `release` refuses to trust a log that fails
   verification. Run sentry on a machine you trust, and ship reports off-host (the webhook, or
