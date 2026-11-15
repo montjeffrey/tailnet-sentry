@@ -296,6 +296,9 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 
 	cfg := rules.DefaultConfig()
 	var rulesInfo *report.RulesInfo
+	if *rulesFile == "" && *rulesPin != "" {
+		return exitError, errors.New("--rules-sha256 (or SENTRY_RULES_SHA256) is set but there is no --rules file to check it against")
+	}
 	if *rulesFile != "" {
 		var digest string
 		var err error
@@ -429,6 +432,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	digest := fs.Bool("digest", false, "print the sha256 of the existing baseline, for --baseline-sha256, and exit")
 	reseal := fs.Bool("reseal", false, "bless the existing baseline file as it is now, after a deliberate hand edit")
 	allowPartial := fs.Bool("allow-partial", false, "allow recording a baseline from the local source, which can miss devices")
+	allowEmpty := fs.Bool("allow-empty", false, "allow recording a baseline of zero devices")
 	pin := fs.String("baseline-sha256", d.getenv("SENTRY_BASELINE_SHA256"),
 		"with --accept: refuse to change a baseline that does not have this sha256 (env SENTRY_BASELINE_SHA256)")
 	if pos, err := parse(fs, args); err != nil {
@@ -438,6 +442,16 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	if err := c.check(); err != nil {
 		return err
+	}
+	// The pin is only applied by --accept. An explicit --baseline-sha256 with
+	// anything else (a fresh or --force baseline, --digest, --reseal) would be
+	// silently ignored, so say so. The environment variable is not checked:
+	// it is meant to be set once for every command.
+	explicitPin := false
+	fs.Visit(func(f *flag.Flag) { explicitPin = explicitPin || f.Name == "baseline-sha256" })
+	if explicitPin && *accept == "" {
+		return errors.New("--baseline-sha256 only applies to --accept; this command does not check it " +
+			"(--force, --reseal and --digest replace or read the baseline without it)")
 	}
 	if *digest || *reseal {
 		if *digest && *reseal {
@@ -460,6 +474,12 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	}
 	if *accept != "" {
 		return acceptDevice(&c, inv, *accept, *pin, d)
+	}
+	// An empty inventory is what a wrong tailnet, a scoped-down key or an
+	// outage returns, and an empty baseline would call every later device new.
+	if len(inv.Devices) == 0 && !*allowEmpty {
+		return errors.New("the inventory has no devices, so the baseline would be empty. Check the tailnet and " +
+			"credentials, or pass --allow-empty to record an empty baseline anyway")
 	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
@@ -700,6 +720,9 @@ func cmdRelease(ctx context.Context, args []string, d deps) error {
 		base, err := baseline.Load(a.baselinePath())
 		switch {
 		case errors.Is(err, os.ErrNotExist):
+			if *pin != "" {
+				return errors.New("--baseline-sha256 (or SENTRY_BASELINE_SHA256) is set but there is no baseline to check it against")
+			}
 		case err != nil:
 			return err
 		default:
