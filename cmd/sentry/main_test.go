@@ -841,3 +841,30 @@ func TestParseAllowsFlagsAfterArguments(t *testing.T) {
 		t.Errorf("parse flag then -- = %v, %v, apply=%v", pos, err, *apply)
 	}
 }
+
+func TestQuarantineTagDoesNotHideAnUnbaselinedOrRoutingDevice(t *testing.T) {
+	// A device that enrols already tagged tag:quarantine, with no isolate
+	// record in the audit log, is new.
+	h := newHarness(t)
+	h.mustBaseline()
+	d := intruder()
+	d["tags"] = []string{"tag:quarantine"}
+	h.api.add(d)
+	code, out, _ := h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "new-device") || strings.Contains(out, "1 quarantined") {
+		t.Errorf("pre-tagged new device: exit %d\n%s", code, out)
+	}
+
+	// A baselined subnet router that sentry isolated without --deauthorize
+	// keeps its routes, and says so on every scan.
+	h = newHarness(t)
+	h.mustBaseline()
+	if code, out, errOut := h.run("isolate", "nas", "--apply"); code != exitClean {
+		t.Fatalf("isolate: exit %d\n%s%s", code, out, errOut)
+	}
+	h.api.device("nNASCNTRL")["enabledRoutes"] = []string{"192.168.1.0/24"}
+	code, out, _ = h.run("scan")
+	if code != exitAnomalies || !strings.Contains(out, "quarantined-still-routing") {
+		t.Errorf("isolated router still routing: exit %d\n%s", code, out)
+	}
+}

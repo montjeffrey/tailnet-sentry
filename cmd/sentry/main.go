@@ -341,6 +341,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 
 	now := d.now()
 	findings := rules.Evaluate(inv, &base, cfg, now)
+	findings = withoutIsolatedNewDevices(inv, findings, c.auditPath())
 	rep := report.Build(inv, &base, findings, version, now)
 	if c.json {
 		err = rep.WriteJSON(d.stdout)
@@ -367,6 +368,37 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 		return exitAnomalies, nil
 	}
 	return exitClean, nil
+}
+
+// withoutIsolatedNewDevices drops the new-device finding for a device that is
+// tagged only tag:quarantine and that sentry's own audit log shows it
+// isolating (and not since released): the operator contained it, and a scan
+// that kept calling it new would never go quiet. A quarantined device the
+// baseline never saw and the log does not explain stays reported, and so does
+// every device when the log fails verification.
+func withoutIsolatedNewDevices(inv inventory.Inventory, findings []rules.Finding, auditPath string) []rules.Finding {
+	quarantined := map[string]bool{}
+	for _, dev := range inv.Devices {
+		if rules.Quarantined(dev) {
+			quarantined[dev.ID] = true
+		}
+	}
+	if len(quarantined) == 0 {
+		return findings
+	}
+	if _, err := audit.Verify(auditPath); err != nil {
+		return findings
+	}
+	var out []rules.Finding
+	for _, f := range findings {
+		if f.Rule == "new-device" && quarantined[f.DeviceID] {
+			if open, err := audit.OpenIsolation(auditPath, f.DeviceID); err == nil && open != nil {
+				continue
+			}
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 func cmdBaseline(ctx context.Context, args []string, d deps) error {
