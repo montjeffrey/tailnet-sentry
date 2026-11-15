@@ -53,6 +53,24 @@ func TestResolveAmbiguousNamesCandidates(t *testing.T) {
 	}
 }
 
+// A device cannot make another one unreachable by node ID by naming its own
+// hostname after that ID: an exact node ID match wins outright.
+func TestResolveNodeIDWinsOverAHostnameThatEqualsIt(t *testing.T) {
+	inv := Inventory{Devices: []Device{
+		{ID: "nAAA", Name: "real.example.ts.net", Hostname: "real"},
+		{ID: "nBBB", Name: "decoy.example.ts.net", Hostname: "nAAA"},
+	}}
+	d, err := inv.Resolve("nAAA")
+	if err != nil || d.ID != "nAAA" {
+		t.Errorf("Resolve(node ID) = %q, %v; want nAAA", d.ID, err)
+	}
+	// Anything that is not an exact node ID is still ambiguous, not a guess.
+	inv.Devices[1].Hostname = "real"
+	if _, err := inv.Resolve("real"); err == nil {
+		t.Error("two devices called real must stay ambiguous")
+	}
+}
+
 func TestExitNode(t *testing.T) {
 	tests := []struct {
 		routes []string
