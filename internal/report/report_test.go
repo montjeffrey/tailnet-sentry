@@ -121,8 +121,11 @@ func TestHostileHostnameCannotHideInTable(t *testing.T) {
 }
 
 // Format characters (bidi overrides, zero-width and tag characters) are
-// escaped in JSON as they are scrubbed in the table, so a consumer that shows
-// the strings cannot be fooled by a hostile hostname.
+// written as \u escapes in the serialized JSON, so the bytes of the report
+// and of the webhook payload carry none of them raw and a viewer or log
+// collector that prints those bytes shows no reordered text. A JSON parser
+// still decodes the escapes back to the original characters, so a consumer
+// that displays the decoded strings must scrub them itself.
 func TestJSONEscapesFormatCharacters(t *testing.T) {
 	hostile := "evil\u202egnp.example.ts.net\u200b\U000e0041\u0085"
 	inv := inventory.Inventory{Source: inventory.SourceAPI, Devices: []inventory.Device{
@@ -152,8 +155,11 @@ func TestJSONEscapesFormatCharacters(t *testing.T) {
 
 	// The escaped output still decodes to the original text.
 	var back Report
-	if err := json.Unmarshal(buf.Bytes(), &back); err != nil || back.Devices[0].Name != "evil\u202egnp" {
-		t.Errorf("round trip: %v, name %q", err, back.Devices[0].Name)
+	if err := json.Unmarshal(buf.Bytes(), &back); err != nil {
+		t.Fatalf("round trip: %v", err)
+	}
+	if len(back.Devices) == 0 || back.Devices[0].Name != "evil‮gnp" {
+		t.Fatalf("round trip lost the device or its name: %+v", back.Devices)
 	}
 
 	var body []byte

@@ -217,8 +217,9 @@ Limits:
 Drift rules compare with the baseline and stay quiet about what you accepted. Hygiene rules fire on
 the current state, because time alone makes them true. A field the source cannot see is "unknown",
 never "bad". A device whose only tag is `tag:quarantine` is shown as quarantined and skipped, except
-for three rules that stay true after isolation: `new-device` (unless the audit log shows sentry
-isolated it), `multiple-connections`, and `quarantined-still-routing`. One that has `tag:quarantine`
+for four rules that stay true after isolation: `new-device` (lowered to low, never dropped, when the
+audit log shows sentry isolated it), `multiple-connections`, `identity-changed`, and
+`quarantined-still-routing`. One that has `tag:quarantine`
 *alongside* other tags is evaluated like any other, so the tag cannot be used to hide a device that
 still has access.
 
@@ -231,7 +232,7 @@ still has access.
 | `unexpected-tags` | high | tags not in the device's baseline record or `allowedTags` | api, local |
 | `unexpected-routes` | high | subnet routes not in its baseline record or `allowedRoutes` | api, local\* |
 | `exit-node` | high | the device newly advertises itself as an exit node | api, local\* |
-| `quarantined-still-routing` | medium | a device tagged only `tag:quarantine` is still authorized and has approved routes or is an exit node (tags do not revoke routes; `--deauthorize` it or revoke the routes) | api, local\* |
+| `quarantined-still-routing` | medium | a device tagged only `tag:quarantine` is still authorized and has approved routes, exit routes included (tags do not revoke routes; `--deauthorize` it or revoke the routes) | api, local\* |
 | `key-expired` | high | the node key has expired | api, local |
 | `key-expiry-disabled` | medium | key expiry was turned off since the baseline (or on a new device) | api, local |
 | `key-expiring` | medium | the key expires within `expiryWarnDays` (default 14) | api, local |
@@ -400,8 +401,8 @@ it the same way:
   verification. Run sentry on a machine you trust, and ship reports off-host (the webhook, or
   `--json` to a log collector).
 - **Someone applying `tag:quarantine` themselves.** A device tagged only `tag:quarantine` skips most
-  rules, but is still reported as `new-device` if the baseline has never seen it and the audit log
-  does not show sentry isolating it, and as `quarantined-still-routing` while it is authorized and
+  rules, but is still reported as `new-device` if the baseline has never seen it (at high severity
+  unless the audit log shows sentry isolating it, then at low, so it stays visible), and as `quarantined-still-routing` while it is authorized and
   routing. Under the example policy only admins can apply the tag, and a device that has it reaches
   nothing, so hiding this way also cuts the device off.
 - **The local source's blind spots.** It sees only peers this device's policy shows it, and no

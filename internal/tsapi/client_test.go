@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 )
 
 var fakeClientSecret = testkeys.Fake("client", "goodsecret")
