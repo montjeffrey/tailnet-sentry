@@ -134,3 +134,26 @@ func TestQuarantinedDeviceWithFindingsIsNotShownAsQuarantined(t *testing.T) {
 		t.Errorf("status %s, summary %+v", r.Devices[0].Status, r.Summary)
 	}
 }
+
+func TestTableStatesWhatTheRulesFileSilences(t *testing.T) {
+	rep := sample()
+	rep.Rules = &RulesInfo{SHA256: "abc123", Disabled: []string{"new-device"}, AllowedOwners: []string{"x" + "\x1b[2J@y"}}
+	var buf bytes.Buffer
+	if err := rep.WriteTable(&buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"rules file sha256 abc123", "disabled rules: new-device", "allowed owners: x?[2J@y"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.ContainsRune(out, '\x1b') {
+		t.Error("escape sequence reached the terminal")
+	}
+	buf.Reset()
+	_ = rep.WriteJSON(&buf)
+	if !strings.Contains(buf.String(), `"disabled": [`) || !strings.Contains(buf.String(), `"allowedOwners": [`) {
+		t.Errorf("JSON lacks the rules block:\n%s", buf.String())
+	}
+}

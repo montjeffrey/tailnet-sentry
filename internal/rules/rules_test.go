@@ -451,3 +451,30 @@ func TestQuarantinedDevicesStillGetTheRulesQuarantineDoesNotAnswer(t *testing.T)
 		t.Errorf("fired on a device without the quarantine tag: %v", got)
 	}
 }
+
+func TestLoadConfigDigestAndPin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rules.json")
+	write := func(body string) {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`{"allowedTags":["tag:server"]}`)
+	_, digest, err := LoadConfigDigest(path)
+	if err != nil || len(digest) != 64 {
+		t.Fatalf("digest %q, err %v", digest, err)
+	}
+	for _, pin := range []string{digest, "sha256:" + strings.ToUpper(digest), " " + digest + " "} {
+		if err := CheckPin(digest, pin); err != nil {
+			t.Errorf("pin %q: %v", pin, err)
+		}
+	}
+	write(`{"allowedTags":["tag:server"],"disabled":["new-device"]}`)
+	_, changed, err := LoadConfigDigest(path)
+	if err != nil || changed == digest {
+		t.Fatalf("an edited rules file kept its digest (%v)", err)
+	}
+	if err := CheckPin(changed, digest); err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Errorf("edited file against the old pin: %v", err)
+	}
+}

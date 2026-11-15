@@ -58,6 +58,17 @@ type BaselineInfo struct {
 	Sealed    bool      `json:"sealed"`
 }
 
+// RulesInfo states what a rules file told the scan to ignore, so a report
+// that is clean because rules were switched off or allow-listed says so. It
+// is present only when a rules file was used.
+type RulesInfo struct {
+	SHA256        string   `json:"sha256"`
+	Disabled      []string `json:"disabled,omitempty"`
+	AllowedOwners []string `json:"allowedOwners,omitempty"`
+	AllowedTags   []string `json:"allowedTags,omitempty"`
+	AllowedRoutes []string `json:"allowedRoutes,omitempty"`
+}
+
 // Report is the result of one scan.
 type Report struct {
 	Tool        string           `json:"tool"`
@@ -68,6 +79,7 @@ type Report struct {
 	// device's policy shows it: a clean report is not proof of a clean tailnet.
 	Degraded bool            `json:"degraded,omitempty"`
 	Baseline *BaselineInfo   `json:"baseline,omitempty"`
+	Rules    *RulesInfo      `json:"rules,omitempty"`
 	Summary  Summary         `json:"summary"`
 	Devices  []DeviceStatus  `json:"devices"`
 	Findings []rules.Finding `json:"findings"`
@@ -133,6 +145,20 @@ func (r Report) WriteTable(w io.Writer) error {
 	fmt.Fprintln(w, head)
 	if r.Degraded {
 		fmt.Fprintln(w, DegradedNote)
+	}
+	if r.Rules != nil {
+		fmt.Fprintln(w, "rules file sha256 "+Clean(r.Rules.SHA256))
+		for _, l := range []struct {
+			label string
+			vals  []string
+		}{
+			{"disabled rules", r.Rules.Disabled}, {"allowed owners", r.Rules.AllowedOwners},
+			{"allowed tags", r.Rules.AllowedTags}, {"allowed routes", r.Rules.AllowedRoutes},
+		} {
+			if len(l.vals) > 0 {
+				fmt.Fprintf(w, "  %s: %s\n", l.label, Clean(strings.Join(l.vals, ", ")))
+			}
+		}
 	}
 	fmt.Fprintln(w)
 

@@ -258,6 +258,10 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	var c common
 	c.register(fs, d)
 	rulesFile := fs.String("rules", "", "rules config JSON (allow lists, thresholds, disabled rules)")
+	// The rules file can silence any finding, so it wants the same off-host
+	// pin as the baseline.
+	rulesPin := fs.String("rules-sha256", d.getenv("SENTRY_RULES_SHA256"),
+		"refuse to scan unless the --rules file has this sha256, as printed in a --json report's rules.sha256 (env SENTRY_RULES_SHA256)")
 	// Chat webhook URLs carry their own secret, so the environment is the
 	// better place for one: a flag shows up in `ps` and in scheduler UIs.
 	webhook := fs.String("webhook", d.getenv("SENTRY_WEBHOOK"),
@@ -291,11 +295,20 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	}
 
 	cfg := rules.DefaultConfig()
+	var rulesInfo *report.RulesInfo
 	if *rulesFile != "" {
+		var digest string
 		var err error
-		if cfg, err = rules.LoadConfig(*rulesFile); err != nil {
+		if cfg, digest, err = rules.LoadConfigDigest(*rulesFile); err != nil {
 			return exitError, err
 		}
+		if *rulesPin != "" {
+			if err := rules.CheckPin(digest, *rulesPin); err != nil {
+				return exitError, err
+			}
+		}
+		rulesInfo = &report.RulesInfo{SHA256: digest, Disabled: cfg.Disabled,
+			AllowedOwners: cfg.AllowedOwners, AllowedTags: cfg.AllowedTags, AllowedRoutes: cfg.AllowedRoutes}
 	}
 	if set["expiry-days"] {
 		cfg.ExpiryWarnDays = *expiryDays
@@ -343,6 +356,7 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	findings := rules.Evaluate(inv, &base, cfg, now)
 	findings = withoutIsolatedNewDevices(inv, findings, c.auditPath())
 	rep := report.Build(inv, &base, findings, version, now)
+	rep.Rules = rulesInfo
 	if c.json {
 		err = rep.WriteJSON(d.stdout)
 	} else {
