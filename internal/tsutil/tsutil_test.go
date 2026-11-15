@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"github.com/montjeffrey/tailnet-sentry/internal/tsapi"
 )
 
@@ -94,8 +95,8 @@ func TestScrubbedVarsMatchCredentialEnv(t *testing.T) {
 }
 
 func TestChildEnvDropsCredentials(t *testing.T) {
-	t.Setenv("TS_API_KEY", "tskey-api-should-not-pass")
-	t.Setenv("TS_OAUTH_CLIENT_SECRET", "tskey-client-should-not-pass")
+	t.Setenv("TS_API_KEY", testkeys.Fake("api", "should-not-pass"))
+	t.Setenv("TS_OAUTH_CLIENT_SECRET", testkeys.Fake("client", "should-not-pass"))
 	t.Setenv("SENTRY_WEBHOOK", "https://hooks.example.invalid/should-not-pass")
 	t.Setenv("SENTRY_TEST_OTHER", "should-not-pass")
 	t.Setenv("PATH", "/kept")

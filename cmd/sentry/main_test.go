@@ -17,6 +17,7 @@ import (
 
 	"github.com/montjeffrey/tailnet-sentry/internal/audit"
 	"github.com/montjeffrey/tailnet-sentry/internal/inventory"
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"github.com/montjeffrey/tailnet-sentry/internal/tsapi"
 	"github.com/montjeffrey/tailnet-sentry/internal/tsutil"
 )
@@ -24,7 +25,7 @@ import (
 // These tests drive the real command code end to end against an httptest
 // stand-in for the Tailscale API. Nothing here reaches the network.
 
-const testKey = "tskey-api-kTEST0000CNTRL-ThisIsNotARealKey"
+var testKey = testkeys.Fake("api", "kTEST0000CNTRL-ThisIsNotARealKey")
 
 var testNow = time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 
