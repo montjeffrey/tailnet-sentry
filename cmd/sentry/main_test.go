@@ -209,6 +209,32 @@ func TestScanCleanThenFlagsTheIntruder(t *testing.T) {
 	}
 }
 
+func TestScanRefusesAnEmptyInventoryAgainstAFilledBaseline(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.mu.Lock()
+	h.api.devices = []apiDev{}
+	h.api.mu.Unlock()
+	code, out, errOut := h.run("scan")
+	if code != exitError || !strings.Contains(errOut, "no devices") || !strings.Contains(errOut, "baseline has 2") {
+		t.Errorf("empty inventory: exit %d\n%s%s", code, out, errOut)
+	}
+	if strings.Contains(out, "0 healthy") {
+		t.Errorf("a report was printed:\n%s", out)
+	}
+}
+
+func TestScanRefusesAResponseWithoutADeviceList(t *testing.T) {
+	h := newHarness(t)
+	h.mustBaseline()
+	h.api.mu.Lock()
+	h.api.devices = nil // encodes as {"devices":null}
+	h.api.mu.Unlock()
+	if code, out, errOut := h.run("scan"); code != exitError || out != "" {
+		t.Errorf("null device list: exit %d\n%s%s", code, out, errOut)
+	}
+}
+
 func TestScanJSON(t *testing.T) {
 	h := newHarness(t)
 	h.mustBaseline()

@@ -325,6 +325,14 @@ func cmdScan(ctx context.Context, args []string, d deps) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
+	// An empty inventory against a baseline that has devices is not a clean
+	// tailnet: it is a failed or truncated read (or a tailnet that is gone),
+	// and "0 devices: 0 healthy" would hide it.
+	if len(inv.Devices) == 0 && len(base.Devices) > 0 {
+		return exitError, fmt.Errorf("the %s source returned no devices, but the baseline has %d; "+
+			"refusing to report that as healthy. Check the credential, the --tailnet and the connection",
+			inv.Source, len(base.Devices))
+	}
 	if base.Source != inv.Source {
 		return exitError, fmt.Errorf("the baseline was recorded from the %s source but this scan read %s; "+
 			"the two see different fields, so comparing them would raise false alarms. "+

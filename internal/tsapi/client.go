@@ -178,14 +178,19 @@ func (d apiDevice) toDevice() inventory.Device {
 // ListDevices returns every device in the tailnet, with all fields.
 func (c *Client) ListDevices(ctx context.Context) (inventory.Inventory, error) {
 	path := "/tailnet/" + url.PathEscape(c.tailnet) + "/devices?fields=all"
+	// A pointer, so a response with no "devices" (or a null one) is told
+	// apart from a real, empty list: the first is not an inventory at all.
 	var out struct {
-		Devices []apiDevice `json:"devices"`
+		Devices *[]apiDevice `json:"devices"`
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return inventory.Inventory{}, err
 	}
+	if out.Devices == nil {
+		return inventory.Inventory{}, errors.New("tailscale API: GET " + trimQuery(path) + ": the response has no devices list")
+	}
 	inv := inventory.Inventory{Source: inventory.SourceAPI, Taken: time.Now().UTC()}
-	for _, d := range out.Devices {
+	for _, d := range *out.Devices {
 		dev := d.toDevice()
 		if dev.ID == "" {
 			return inventory.Inventory{}, errors.New("tailscale API returned a device with no ID")
