@@ -410,6 +410,8 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 	digest := fs.Bool("digest", false, "print the sha256 of the existing baseline, for --baseline-sha256, and exit")
 	reseal := fs.Bool("reseal", false, "bless the existing baseline file as it is now, after a deliberate hand edit")
 	allowPartial := fs.Bool("allow-partial", false, "allow recording a baseline from the local source, which can miss devices")
+	pin := fs.String("baseline-sha256", d.getenv("SENTRY_BASELINE_SHA256"),
+		"with --accept: refuse to change a baseline that does not have this sha256 (env SENTRY_BASELINE_SHA256)")
 	if pos, err := parse(fs, args); err != nil {
 		return err
 	} else if len(pos) > 0 {
@@ -438,7 +440,7 @@ func cmdBaseline(ctx context.Context, args []string, d deps) error {
 			"inventory, or pass --allow-partial to record a partial baseline anyway")
 	}
 	if *accept != "" {
-		return acceptDevice(&c, inv, *accept, d)
+		return acceptDevice(&c, inv, *accept, *pin, d)
 	}
 	b := baseline.FromInventory(inv, d.now())
 	if err := baseline.Save(c.baselinePath(), b, *force); err != nil {
@@ -496,10 +498,18 @@ func baselineOffline(c *common, reseal bool, d deps) error {
 // acceptDevice records one device's current state in the existing baseline,
 // so a device that is new but legitimate stops being reported without
 // re-accepting everything else in the tailnet at the same time.
-func acceptDevice(c *common, inv inventory.Inventory, query string, d deps) error {
+func acceptDevice(c *common, inv inventory.Inventory, query, pin string, d deps) error {
 	base, err := baseline.Load(c.baselinePath())
 	if err != nil {
 		return err
+	}
+	// Saving re-seals the whole file, so a baseline someone else edited would
+	// be blessed along with the one device added. Hold it to the same pin scan
+	// uses before changing anything.
+	if pin != "" {
+		if err := base.CheckPin(pin); err != nil {
+			return err
+		}
 	}
 	if base.Source != inv.Source {
 		return fmt.Errorf("the baseline was recorded from the %s source; accept with --source %s", base.Source, base.Source)
