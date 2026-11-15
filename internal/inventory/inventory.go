@@ -130,6 +130,13 @@ func (inv Inventory) Resolve(query string) (Device, error) {
 	if q == "" {
 		return Device{}, fmt.Errorf("no device given")
 	}
+	// A node ID names one device. Hostnames are chosen by whoever controls the
+	// device, so one set to another's node ID must not make that ID ambiguous.
+	for _, d := range inv.Devices {
+		if d.ID == q {
+			return d, nil
+		}
+	}
 	full := strings.ToLower(strings.TrimSuffix(q, "."))
 	var matches []Device
 	for _, d := range inv.Devices {
