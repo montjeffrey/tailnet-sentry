@@ -87,6 +87,10 @@ rewrite the terminal to hide its own row. This applies to the table, the
 isolate and release plans, and error messages. In `--json` output and the
 webhook payload the same characters are kept but written as `\u` escapes (the
 standard encoder alone leaves bidi overrides and zero-width characters raw).
+This protects the serialized bytes, so a viewer or log collector that prints
+them shows no reordered text. A JSON parser decodes the escapes back to the
+original characters, so a consumer that displays parsed strings must scrub them
+itself.
 
 ## Supply chain
 

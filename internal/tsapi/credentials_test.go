@@ -3,9 +3,10 @@ package tsapi
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 	"strings"
 	"testing"
+
+	"github.com/montjeffrey/tailnet-sentry/internal/testkeys"
 )
 
 var fakeKey = testkeys.Fake("api", "kFAKE0000CNTRL-NotARealSecretValue0000")
