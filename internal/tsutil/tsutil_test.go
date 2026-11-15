@@ -53,6 +53,14 @@ func TestParse(t *testing.T) {
 	if strings.Join(nas.AdvertisedRoutes, ",") != "192.168.1.0/24,0.0.0.0/0,::/0" || !nas.ExitNode() {
 		t.Errorf("nas routes = %v", nas.AdvertisedRoutes)
 	}
+	// The local status only lists routes a peer serves, so those are its
+	// enabled routes too (quarantined-still-routing reads them).
+	if strings.Join(nas.EnabledRoutes, ",") != "192.168.1.0/24,0.0.0.0/0,::/0" {
+		t.Errorf("nas enabled routes = %v", nas.EnabledRoutes)
+	}
+	if len(desktop.EnabledRoutes) != 0 {
+		t.Errorf("desktop enabled routes = %v", desktop.EnabledRoutes)
+	}
 }
 
 func TestParseRejects(t *testing.T) {

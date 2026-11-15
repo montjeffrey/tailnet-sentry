@@ -112,7 +112,7 @@ func All() []Rule {
 		{"unexpected-tags", High, "device carries tags it did not have", UnexpectedTags},
 		{"unexpected-routes", High, "device advertises subnet routes it did not have", UnexpectedRoutes},
 		{"exit-node", High, "device newly offers itself as an exit node", ExitNode},
-		{"quarantined-still-routing", Medium, "a quarantined device is still authorized and routing or an exit node", QuarantinedStillRouting},
+		{"quarantined-still-routing", Medium, "a quarantined device is still authorized with approved routes", QuarantinedStillRouting},
 		{"key-expired", High, "node key has expired", KeyExpired},
 		{"key-expiry-disabled", Medium, "node key was set never to expire", KeyExpiryDisabled},
 		{"key-expiring", Medium, "node key expires soon", KeyExpiring},
@@ -126,10 +126,11 @@ func All() []Rule {
 // afterQuarantine are the rules that still run on a device whose only tag is
 // tag:quarantine, because the tag does not make them untrue: a quarantined
 // device the baseline never saw was not isolated by sentry, and one with
-// cloned node state or live routes is not contained.
+// cloned node state, a changed identity or live routes is not contained.
 var afterQuarantine = map[string]bool{
 	"new-device":                true,
 	"multiple-connections":      true,
+	"identity-changed":          true,
 	"quarantined-still-routing": true,
 }
 
@@ -269,13 +270,14 @@ func ExitNode(env Env, d inventory.Device, known *baseline.Record) []string {
 }
 
 // QuarantinedStillRouting fires for a device whose only tag is tag:quarantine
-// but which is still authorized and has approved routes or offers itself as
-// an exit node. Tags do not revoke routes, so such a device keeps forwarding.
+// but which is still authorized and has approved routes, exit routes
+// included (EnabledRoutes). Advertised-only routes forward nothing. Tags do
+// not revoke routes, so such a device keeps forwarding.
 func QuarantinedStillRouting(_ Env, d inventory.Device, _ *baseline.Record) []string {
-	if !Quarantined(d) || !d.Authorized || (len(d.EnabledRoutes) == 0 && !d.ExitNode()) {
+	if !Quarantined(d) || !d.Authorized || len(d.EnabledRoutes) == 0 {
 		return nil
 	}
-	return []string{"quarantined, but still authorized and routing or an exit node: deauthorize it or revoke its routes"}
+	return []string{"quarantined, but still authorized with approved routes (subnet or exit): deauthorize it or revoke its routes"}
 }
 
 // KeyExpired fires once a node key's expiry has passed. Like the other key

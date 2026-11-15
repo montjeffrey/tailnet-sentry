@@ -141,6 +141,8 @@ func convert(p rawPeer, login func(int64) string, self bool) inventory.Device {
 	if p.ExitNodeOption {
 		d.AdvertisedRoutes = append(d.AdvertisedRoutes, "0.0.0.0/0", "::/0")
 	}
+	// Those are routes in service, which is what the API calls enabled.
+	d.EnabledRoutes = append(d.EnabledRoutes, d.AdvertisedRoutes...)
 	return d
 }
 

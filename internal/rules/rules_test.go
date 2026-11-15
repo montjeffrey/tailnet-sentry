@@ -427,8 +427,16 @@ func TestQuarantinedDevicesStillGetTheRulesQuarantineDoesNotAnswer(t *testing.T)
 		{"not in the baseline", quarantined(nil), unknown, DefaultConfig(), "new-device"},
 		{"still routing", quarantined(func(d *inventory.Device) { d.EnabledRoutes = []string{"192.168.1.0/24"} }),
 			known, DefaultConfig(), "quarantined-still-routing"},
-		{"still an exit node", quarantined(func(d *inventory.Device) { d.AdvertisedRoutes = []string{"0.0.0.0/0", "::/0"} }),
+		{"still an exit node", quarantined(func(d *inventory.Device) { d.EnabledRoutes = []string{"0.0.0.0/0", "::/0"} }),
 			known, DefaultConfig(), "quarantined-still-routing"},
+		// Advertised is not approved: an exit node nobody approved routes nothing.
+		{"exit node advertised but never approved", quarantined(func(d *inventory.Device) {
+			d.AdvertisedRoutes = []string{"0.0.0.0/0", "::/0"}
+		}), known, DefaultConfig(), ""},
+		{"identity changed while tagged quarantine", quarantined(func(d *inventory.Device) {
+			d.OS, d.Addresses = "linux", []string{"100.64.0.9"}
+		}), baseline.Baseline{Devices: []baseline.Record{{ID: "nQ", Owner: "mallory@example.com", OS: "windows"}}},
+			DefaultConfig(), "identity-changed"},
 		{"cloned node key", quarantined(func(d *inventory.Device) { d.MultipleConnections = true }),
 			known, DefaultConfig(), "multiple-connections"},
 		{"rule can still be disabled", quarantined(nil), unknown, func() Config {
