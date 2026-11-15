@@ -59,6 +59,7 @@ func PostWebhook(ctx context.Context, hc *http.Client, rawURL string, r Report) 
 	if err != nil {
 		return err
 	}
+	body = escapeFormat(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("webhook to %s: invalid request", u.Host)

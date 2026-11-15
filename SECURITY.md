@@ -84,8 +84,9 @@ Device names, hostnames, owners and OS strings come from whoever controls the
 device. Before printing, control and format characters (including ANSI escape
 sequences and bidi overrides) are replaced, so a hostile hostname cannot
 rewrite the terminal to hide its own row. This applies to the table, the
-isolate and release plans, and error messages. JSON output is escaped by the
-encoder.
+isolate and release plans, and error messages. In `--json` output and the
+webhook payload the same characters are kept but written as `\u` escapes (the
+standard encoder alone leaves bidi overrides and zero-width characters raw).
 
 ## Supply chain
 
