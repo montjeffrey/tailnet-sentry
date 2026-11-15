@@ -346,6 +346,11 @@ func TestIsolateApplyThenRelease(t *testing.T) {
 	if code, out, _ := h.run("scan"); code != exitClean || !strings.Contains(out, "quarantined") {
 		t.Errorf("scan after isolate: exit %d\n%s", code, out)
 	}
+	// The new-device finding is not dropped: it stays, as low, and says why.
+	if code, out, _ := h.run("scan", "--json"); code != exitClean || !strings.Contains(out, "isolated by sentry on") ||
+		!strings.Contains(out, "per audit log") || kaliNewDeviceSeverity(t, out) != "low" {
+		t.Errorf("isolated device's finding: exit %d, severity %q\n%s", code, kaliNewDeviceSeverity(t, out), out)
+	}
 
 	code, out, errOut = h.run("release", "kali", "--apply")
 	if code != exitClean {
@@ -983,5 +988,95 @@ func TestRulesFileIsReportedAndCanBePinned(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("silenced scan (exit %d) does not say %q:\n%s", code, want, out)
 		}
+	}
+}
+
+// kaliNewDeviceSeverity returns the severity of kali's new-device finding in a
+// scan --json report, or "" if there is none.
+func kaliNewDeviceSeverity(t *testing.T, out string) string {
+	t.Helper()
+	var rep struct {
+		Findings []struct {
+			Rule     string `json:"rule"`
+			DeviceID string `json:"deviceId"`
+			Severity string `json:"severity"`
+		} `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	for _, f := range rep.Findings {
+		if f.Rule == "new-device" && f.DeviceID == "nKALICNTRL" {
+			return string(f.Severity)
+		}
+	}
+	return ""
+}
+
+// The audit log can only lower an unbaselined quarantined device's finding
+// when it truly shows sentry isolating THAT device. Every other case keeps
+// the finding high, so the exit code is 1.
+func TestQuarantinedNewDeviceKeepsItsSeverityWithoutAGoodIsolationRecord(t *testing.T) {
+	quarantine := func(h *harness) {
+		h.api.mu.Lock()
+		defer h.api.mu.Unlock()
+		for _, d := range h.api.devices {
+			if d["nodeId"] == "nKALICNTRL" {
+				d["tags"] = []string{"tag:quarantine"}
+			}
+		}
+	}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, h *harness)
+	}{
+		{"missing log", func(t *testing.T, h *harness) {
+			h.api.add(intruder())
+			quarantine(h)
+		}},
+		{"open isolation of a different device", func(t *testing.T, h *harness) {
+			h.api.add(intruder())
+			quarantine(h)
+			if code, _, errOut := h.run("isolate", "nas", "--apply"); code != exitClean {
+				t.Fatalf("isolate nas: exit %d %s", code, errOut)
+			}
+		}},
+		{"dry-run entries only", func(t *testing.T, h *harness) {
+			h.api.add(intruder())
+			if code, _, errOut := h.run("isolate", "kali"); code != exitClean {
+				t.Fatalf("dry run: exit %d %s", code, errOut)
+			}
+			quarantine(h)
+		}},
+		{"log that fails verification", func(t *testing.T, h *harness) {
+			h.api.add(intruder())
+			if code, _, errOut := h.run("isolate", "kali", "--apply", "--reason", "first"); code != exitClean {
+				t.Fatalf("isolate: exit %d %s", code, errOut)
+			}
+			// Edit an entry that is followed by another: the chain breaks.
+			p := filepath.Join(h.stateDir, "audit.jsonl")
+			b, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			edited := strings.Replace(string(b), "first", "other", 1)
+			if edited == string(b) {
+				t.Fatal("nothing edited")
+			}
+			if err := os.WriteFile(p, []byte(edited), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.mustBaseline() // before kali exists
+			tc.setup(t, h)
+			code, out, errOut := h.run("scan", "--json")
+			if code != exitAnomalies || kaliNewDeviceSeverity(t, out) != "high" || strings.Contains(out, "per audit log") {
+				t.Errorf("exit %d, severity %q\n%s%s", code, kaliNewDeviceSeverity(t, out), out, errOut)
+			}
+		})
 	}
 }
