@@ -22,6 +22,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # full history, so the tag can be checked against main
+          # Keep the write token out of .git/config: the test and build steps
+          # below run repository code and have no use for it. The publish step
+          # gets its token from GH_TOKEN, not from git.
+          persist-credentials: false
 
       # Release only what is already on main. A v* tag on any other commit
       # (an unmerged branch, say) stops here, before anything is built,
