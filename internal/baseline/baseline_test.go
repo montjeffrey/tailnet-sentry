@@ -195,7 +195,8 @@ func TestLoadErrors(t *testing.T) {
 }
 
 // An oversized baseline is refused before it is parsed, so a huge or
-// tampered file cannot exhaust memory.
+// tampered file cannot exhaust memory. LoadUnverified (used by --reseal)
+// skips only the seal check, not the size bound.
 func TestLoadRefusesOversizedFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "huge.json")
 	f, err := os.Create(p)
@@ -207,7 +208,9 @@ func TestLoadRefusesOversizedFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if _, err := Load(p); err == nil || !strings.Contains(err.Error(), "larger than 64 MiB") {
-		t.Errorf("Load error = %v", err)
+	for name, load := range map[string]func(string) (Baseline, error){"Load": Load, "LoadUnverified": LoadUnverified} {
+		if _, err := load(p); err == nil || !strings.Contains(err.Error(), "larger than 64 MiB") {
+			t.Errorf("%s error = %v", name, err)
+		}
 	}
 }
